@@ -1,18 +1,17 @@
 # kube-port-forward
 
-CLI wrapper kolem `kubectl port-forward`, který se automaticky znovu připojí při výpadku spojení.
+Správce Kubernetes port-forward s automatickým reconnectem a živým webovým UI.
 
-## Problém
+## Funkce
 
-`kubectl port-forward` občas spadne s chybou:
-
-```
-Forwarding from 127.0.0.1:9090 -> 9090
-Handling connection for 9090
-error: lost connection to pod
-```
-
-V takovém případě je nutné příkaz ručně restartovat. Tento wrapper to udělá za vás.
+- **Auto-reconnect** — automaticky restartuje port-forward při výpadku spojení
+- **Podpora Service** — rozloží Service na všechny backing pody a každý namapuje na samostatný lokální port
+- **Dynamické sledování** — detekuje nové nebo odstraněné pody v reálném čase; nové pody dostávají nový lokální port automaticky
+- **Wildcard porty** — `9091:*` expanduje na všechny `containerPort` hodnoty deklarované v pod spec
+- **Více resources najednou** — forwardování více services nebo podů jedním příkazem
+- **Webové UI** — živá stránka v prohlížeči se stavem podů, metadaty, proklikem a kopírováním, auto-refresh přes SSE
+- **Autodetekce namespace** — čte výchozí namespace z `~/.kube/config` pokud není zadán přepínač `-n`
+- **Bez závislosti na kubectl** — používá přímo oficiální knihovnu `client-go`
 
 ## Instalace
 
@@ -31,64 +30,106 @@ sudo cp kube-port-forward /usr/local/bin/
 ## Použití
 
 ```
-kube-port-forward [OPTIONS] -- <kubectl port-forward argumenty...>
+kube-port-forward [OPTIONS] -n <namespace> <pod|svc>/<name> <localPort>:<remotePort|*> [...]
 ```
-
-Subpříkaz `port-forward` se přidá automaticky — neuvádějte ho v argumentech.
 
 ### Přepínače
 
 | Přepínač | Výchozí | Popis |
 |----------|---------|-------|
-| `--retries` | `always` | Celkový počet pokusů: kladné celé číslo nebo `always` pro nekonečno |
-| `--retry-interval` | `5` | Počet sekund čekání mezi pokusy o reconnect |
+| `-n` | výchozí z kubeconfig | Kubernetes namespace |
+| `--retries` | `always` | Celkový počet reconnect pokusů na pod: kladné celé číslo nebo `always` |
+| `--retry-interval` | `5` | Sekund čekání mezi pokusy o reconnect |
 | `--log-level` | `info` | Úroveň logování: `debug`, `info`, `warn`, `error` |
+| `--web-port` | `9999` | Lokální port pro webové UI |
+| `--no-open` | vypnuto | Zakáže automatické otevření prohlížeče při startu |
+
+### Syntaxe mapování portů
+
+| Syntaxe | Význam |
+|---------|--------|
+| `9091:9090` | Forwarduj lokální `9091` na pod port `9090` (explicitní) |
+| `9091:*` | Forwarduj od lokálního `9091` na **všechny** `containerPort` hodnoty v pod spec |
+
+> **Důležité:** `localPort:remotePort` vždy tuneluje přímo na **POD**, ne přes Service routing.
+> `remotePort` tedy odkazuje na port, který POD skutečně poslouchá (`containerPort`),
+> nikoli na pole `port` nebo `targetPort` v definici Service.
+>
+> Příklad: pokud Service definuje `port: 9090 → targetPort: 8672`, použití `9091:9090` forwarduje
+> na pod port `9090` (reálný port podu), **ne** na `8672`. Použití `pod/<name>` nebo `svc/<name>`
+> — jediný rozdíl je způsob discovery podů.
 
 ### Příklady
 
-Přesměrování portu podu (při výpadku se automaticky znovu připojí):
+Přesměrování jednoho podu na explicitní port:
 ```bash
-kube-port-forward -- -n nac-app pod/nac-out-6c7985556d-h2cns 9090:9090
+kube-port-forward -n nac-app pod/nac-out-6c7985556d-h2cns 9090:9090
 ```
 
-Přesměrování dvou podů na různé lokální porty:
+Přesměrování všech podů za Service na explicitní vzdálený port:
 ```bash
-kube-port-forward -- -n nac-app pod/nac-out-6c7985556d-h2cns 9090:9090
-kube-port-forward -- -n nac-app pod/nac-out-6c7985556d-kqt8l 9091:9090
+kube-port-forward -n nac-app svc/nac-out 9091:9090
 ```
 
-Přesměrování přes service:
+Přesměrování všech podů, všechny container porty (wildcard):
 ```bash
-kube-port-forward -- -n nac-app svc/nac-out 9090:9090
+kube-port-forward -n nac-app svc/nac-out 9091:*
+# pod má containerPort 8672 a 9090 →
+#   127.0.0.1:9091 → pod:8672
+#   127.0.0.1:9092 → pod:9090
 ```
 
-Maximálně 5 pokusů, čekání 10 sekund mezi pokusy:
+Přesměrování více services jedním příkazem:
 ```bash
-kube-port-forward --retries 5 --retry-interval 10 -- -n nac-app pod/nac-out-xxx 9090:9090
+kube-port-forward -n nac-app svc/foo 9091:9090 svc/bar 9093:8080
 ```
 
-Zobrazení veškerého výstupu kubectl (debug úroveň):
+Omezení počtu pokusů, vlastní interval, bez prohlížeče:
 ```bash
-kube-port-forward --log-level debug -- -n nac-app pod/nac-out-xxx 9090:9090
+kube-port-forward --retries 5 --retry-interval 10 --no-open -n nac-app svc/nac-out 9091:9090
 ```
 
-## Výstup logu
+## Webové UI
 
-Stavové zprávy wrapperu jsou označeny úrovní (`INF`, `WRN`, `ERR`).
-Řádky pocházející z `kubectl` jsou označeny prefixem `[kubectl]`.
+Po spuštění se v prohlížeči otevře stránka na `http://127.0.0.1:9999` (konfigurovatelné přes `--web-port`).
+
+Stránka zobrazuje:
+- Kontext clusteru, adresu serveru, namespace a cílový resource(y)
+- Živý seznam forwardovaných podů se stavem, počtem ready kontejnerů, počtem restartů (barevně odlišeno), IP podu, nodem a věkem
+- **open ↗** — otevře `http://127.0.0.1:<port>` v novém okně
+- **copy** — zkopíruje URL do schránky
+- Ukončené pody zůstanou v seznamu (zašedlé)
+- Titulek tabu prohlížeče zobrazuje `(forwarding/celkem) kube-port-forward`
+- Favicon odráží celkový stav: zelená / žlutá / červená
+
+UI se aktualizuje v reálném čase přes SSE — žádný manuální refresh není potřeba.
+
+## Health endpoint
 
 ```
-09:37:17 INF starting port-forward attempt=1/always cmd="kubectl port-forward -n nac-app pod/nac-out-xxx 9090:9090"
-09:37:17 INF [kubectl] Forwarding from 127.0.0.1:9090 -> 9090
-09:37:17 INF [kubectl] Forwarding from [::1]:9090 -> 9090
-09:37:18 INF [kubectl] Handling connection for 9090
-09:38:01 WRN lost connection to pod
-09:38:01 INF reconnecting in=5s
-09:38:06 INF starting port-forward attempt=2/always cmd="kubectl port-forward -n nac-app pod/nac-out-xxx 9090:9090"
-09:38:06 INF [kubectl] Forwarding from 127.0.0.1:9090 -> 9090
+GET http://127.0.0.1:9999/healthz
 ```
+
+Vrací JSON se stavem `ok` (HTTP 200) nebo `degraded` (HTTP 503):
+
+```json
+{"status":"ok","pods":[{"podName":"nac-out-xxx","localPort":9091,"status":"forwarding"}]}
+```
+
+## Přiřazování portů
+
+Při forwardování service s více pody se lokální porty přiřazují postupně a nikdy se nerecyklují:
+
+```
+svc/nac-out  →  pod-abc  →  127.0.0.1:9091
+             →  pod-def  →  127.0.0.1:9092
+             →  pod-ghi  →  127.0.0.1:9093  (detekován dynamicky přes Watch)
+```
+
+Port ukončeného podu zůstane rezervovaný — číslování je stabilní i po reconnectech.
 
 ## Poznámky
 
-- Wrapper je záměrně omezen pouze na `kubectl port-forward`. Předání jiného subpříkazu způsobí chybu `kubectl`.
 - Pro čisté ukončení stiskněte `Ctrl+C` nebo pošlete signál `SIGTERM`.
+- `--log-level debug` zobrazuje surové události port-forward pro každý pod.
+- Interní logy `client-go` lze potlačit přepínačem `--log-level warn`.
