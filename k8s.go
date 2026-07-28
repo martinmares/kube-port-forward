@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -22,7 +23,7 @@ type clusterInfo struct {
 }
 
 type k8sClient struct {
-	clientset *kubernetes.Clientset
+	clientset kubernetes.Interface
 	config    *rest.Config
 	info      clusterInfo
 }
@@ -37,9 +38,10 @@ func currentContextNamespace() (string, error) {
 	return ns, err
 }
 
-func newK8sClient(namespace string) (*k8sClient, error) {
+func newK8sClient(namespace string, insecure bool) (*k8sClient, error) {
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
 	configOverrides := &clientcmd.ConfigOverrides{}
+	configOverrides.ClusterInfo.InsecureSkipTLSVerify = insecure
 	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
 
 	rawConfig, err := kubeConfig.RawConfig()
@@ -77,38 +79,6 @@ func newK8sClient(namespace string) (*k8sClient, error) {
 	}, nil
 }
 
-// resolveServicePorts returns containerPorts from pods behind a service.
-// This reflects what the POD actually listens on, not what the Service exposes.
-func (c *k8sClient) resolveServicePorts(ctx context.Context, namespace, name string) ([]int, error) {
-	selector, err := c.resolveService(ctx, namespace, name)
-	if err != nil {
-		return nil, err
-	}
-	pods, err := c.listPods(ctx, namespace, selector)
-	if err != nil {
-		return nil, err
-	}
-	if len(pods) == 0 {
-		return nil, fmt.Errorf("no running pods found for service %q", name)
-	}
-	// collect unique containerPorts from first pod
-	seen := map[int]bool{}
-	var ports []int
-	for _, container := range pods[0].Spec.Containers {
-		for _, p := range container.Ports {
-			port := int(p.ContainerPort)
-			if !seen[port] {
-				seen[port] = true
-				ports = append(ports, port)
-			}
-		}
-	}
-	if len(ports) == 0 {
-		return nil, fmt.Errorf("no containerPorts found in pods of service %q", name)
-	}
-	return ports, nil
-}
-
 // resolveService returns the label selector for a service.
 func (c *k8sClient) resolveService(ctx context.Context, namespace, name string) (labels.Selector, error) {
 	svc, err := c.clientset.CoreV1().Services(namespace).Get(ctx, name, metav1.GetOptions{})
@@ -119,6 +89,34 @@ func (c *k8sClient) resolveService(ctx context.Context, namespace, name string) 
 		return nil, fmt.Errorf("service %q has no pod selector", name)
 	}
 	return labels.SelectorFromSet(svc.Spec.Selector), nil
+}
+
+// resolveDeployment returns the pod selector for a Deployment.
+func (c *k8sClient) resolveDeployment(ctx context.Context, namespace, name string) (labels.Selector, error) {
+	deployment, err := c.clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("deployment %q not found in namespace %q: %w", name, namespace, err)
+	}
+	if deployment.Spec.Selector == nil {
+		return nil, fmt.Errorf("deployment %q has no pod selector", name)
+	}
+	selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+	if err != nil {
+		return nil, fmt.Errorf("deployment %q has invalid pod selector: %w", name, err)
+	}
+	return selector, nil
+}
+
+// listServices returns all Services in a namespace in stable name order.
+func (c *k8sClient) listServices(ctx context.Context, namespace string) ([]corev1.Service, error) {
+	list, err := c.clientset.CoreV1().Services(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(list.Items, func(i, j int) bool {
+		return list.Items[i].Name < list.Items[j].Name
+	})
+	return list.Items, nil
 }
 
 // listPods returns all running pods matching the selector.

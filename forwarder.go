@@ -6,10 +6,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
 )
@@ -55,7 +58,9 @@ type podEntry struct {
 	status     podStatus
 	attempt    int
 	meta       podMeta
-	resource   string // e.g. "svc/nac-out"
+	owners     map[string]struct{}
+	resources  map[string]struct{}
+	cancel     context.CancelFunc
 }
 
 type podSnapshot struct {
@@ -83,27 +88,23 @@ func (e *podEntry) setStatus(s podStatus) {
 
 // forwardManager manages all active port-forwards.
 type forwardManager struct {
-	mu           sync.RWMutex
-	entries      []*podEntry // append-only, terminated entries kept for UI
-	nextPorts    map[int]int // target index → next available local port
-	cfg          *config
-	client       *k8sClient
-	logger       *slog.Logger
-	notify       chan struct{} // closed+recreated on state change to notify SSE clients
-	notifyMu     sync.Mutex
+	mu            sync.RWMutex
+	entries       []*podEntry // append-only, terminated entries kept for UI
+	reservedPorts map[int]struct{}
+	cfg           *config
+	client        *k8sClient
+	logger        *slog.Logger
+	notify        chan struct{} // closed+recreated on state change to notify SSE clients
+	notifyMu      sync.Mutex
 }
 
 func newForwardManager(cfg *config, client *k8sClient, logger *slog.Logger) *forwardManager {
-	nextPorts := make(map[int]int, len(cfg.targets))
-	for i, t := range cfg.targets {
-		nextPorts[i] = t.localPort
-	}
 	return &forwardManager{
-		cfg:       cfg,
-		client:    client,
-		logger:    logger,
-		nextPorts: nextPorts,
-		notify:    make(chan struct{}),
+		cfg:           cfg,
+		client:        client,
+		logger:        logger,
+		reservedPorts: make(map[int]struct{}),
+		notify:        make(chan struct{}),
 	}
 }
 
@@ -121,18 +122,33 @@ func (m *forwardManager) subscribe() <-chan struct{} {
 	return m.notify
 }
 
-// addPod starts a port-forward goroutine for a pod if not already tracked.
-func (m *forwardManager) addPod(ctx context.Context, pod *corev1.Pod, targetIdx int) {
-	t := m.cfg.targets[targetIdx]
+func targetOwner(t target) string {
+	return fmt.Sprintf("%s/%s:%d", t.namespace, t.resourceStr(), t.remotePort)
+}
+
+// registerPod creates an entry unless the pod/remote-port pair is already active.
+// Duplicate resources become owners of the existing forward.
+func (m *forwardManager) registerPod(pod *corev1.Pod, t target) (*podEntry, bool, error) {
+	owner := targetOwner(t)
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	for _, e := range m.entries {
-		if e.podName == pod.Name && e.status != statusTerminated {
-			m.mu.Unlock()
-			return
+		e.mu.Lock()
+		if e.namespace == pod.Namespace && e.podName == pod.Name &&
+			e.remotePort == t.remotePort && e.status != statusTerminated {
+			e.owners[owner] = struct{}{}
+			e.resources[t.resourceStr()] = struct{}{}
+			e.mu.Unlock()
+			return e, false, nil
 		}
+		e.mu.Unlock()
 	}
-	localPort := m.nextPorts[targetIdx]
-	m.nextPorts[targetIdx]++
+
+	localPort, err := m.allocateLocalPortLocked(t.localPort)
+	if err != nil {
+		return nil, false, err
+	}
 	entry := &podEntry{
 		podName:    pod.Name,
 		namespace:  pod.Namespace,
@@ -140,28 +156,84 @@ func (m *forwardManager) addPod(ctx context.Context, pod *corev1.Pod, targetIdx 
 		remotePort: t.remotePort,
 		status:     statusConnecting,
 		meta:       extractMeta(pod),
-		resource:   t.resourceStr(),
+		owners:     map[string]struct{}{owner: {}},
+		resources:  map[string]struct{}{t.resourceStr(): {}},
 	}
 	m.entries = append(m.entries, entry)
-	m.mu.Unlock()
-
-	m.logger.Info("adding pod", "pod", pod.Name, "local_port", localPort, "resource", t.resourceStr())
-	m.notifyClients()
-
-	go m.runForward(ctx, entry)
+	return entry, true, nil
 }
 
-// removePod marks a pod as terminated and stops its forward.
-func (m *forwardManager) removePod(podName string) {
+func (m *forwardManager) allocateLocalPortLocked(start int) (int, error) {
+	for port := start; port <= 65535; port++ {
+		if _, reserved := m.reservedPorts[port]; reserved {
+			continue
+		}
+		m.reservedPorts[port] = struct{}{}
+		return port, nil
+	}
+	return 0, fmt.Errorf("no free local port available at or above %d", start)
+}
+
+// addPod starts a port-forward goroutine for a pod if not already tracked.
+func (m *forwardManager) addPod(ctx context.Context, pod *corev1.Pod, t target) error {
+	entry, added, err := m.registerPod(pod, t)
+	if err != nil {
+		return err
+	}
+	if !added {
+		m.logger.Debug("reusing existing forward",
+			"pod", pod.Name,
+			"remote_port", t.remotePort,
+			"resource", t.resourceStr(),
+		)
+		return nil
+	}
+
+	m.logger.Info("adding pod",
+		"pod", pod.Name,
+		"local_port", entry.localPort,
+		"remote_port", entry.remotePort,
+		"resource", t.resourceStr(),
+	)
+	m.notifyClients()
+
+	forwardCtx, cancel := context.WithCancel(ctx)
+	entry.mu.Lock()
+	entry.cancel = cancel
+	entry.mu.Unlock()
+	go m.runForward(forwardCtx, entry)
+	return nil
+}
+
+// removePodOwner drops a resource's ownership and terminates forwards with no owners left.
+func (m *forwardManager) removePodOwner(namespace, podName string, t target) {
+	owner := targetOwner(t)
+	changed := false
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, e := range m.entries {
-		if e.podName == podName {
-			e.setStatus(statusTerminated)
-			m.logger.Info("pod terminated", "pod", podName, "local_port", e.localPort)
-			m.notifyClients()
-			return
+		e.mu.Lock()
+		if e.namespace == namespace && e.podName == podName && e.remotePort == t.remotePort {
+			if _, owned := e.owners[owner]; owned {
+				delete(e.owners, owner)
+			}
+			if len(e.owners) == 0 && e.status != statusTerminated {
+				e.status = statusTerminated
+				if e.cancel != nil {
+					e.cancel()
+				}
+				changed = true
+				m.logger.Info("pod terminated",
+					"pod", podName,
+					"local_port", e.localPort,
+					"remote_port", e.remotePort,
+				)
+			}
 		}
+		e.mu.Unlock()
+	}
+	if changed {
+		m.notifyClients()
 	}
 }
 
@@ -171,6 +243,11 @@ func (m *forwardManager) snapshot() []podSnapshot {
 	out := make([]podSnapshot, len(m.entries))
 	for i, e := range m.entries {
 		e.mu.RLock()
+		resources := make([]string, 0, len(e.resources))
+		for resource := range e.resources {
+			resources = append(resources, resource)
+		}
+		sort.Strings(resources)
 		out[i] = podSnapshot{
 			podName:    e.podName,
 			namespace:  e.namespace,
@@ -179,7 +256,7 @@ func (m *forwardManager) snapshot() []podSnapshot {
 			status:     e.status,
 			attempt:    e.attempt,
 			meta:       e.meta,
-			resource:   e.resource,
+			resource:   strings.Join(resources, ", "),
 		}
 		e.mu.RUnlock()
 	}
@@ -331,10 +408,10 @@ func extractMeta(pod *corev1.Pod) podMeta {
 // watchAndSync starts watchers for all configured targets.
 func (m *forwardManager) watchAndSync(ctx context.Context) error {
 	errCh := make(chan error, len(m.cfg.targets))
-	for i, t := range m.cfg.targets {
-		go func(idx int, t target) {
-			errCh <- m.watchTarget(ctx, idx, t)
-		}(i, t)
+	for _, t := range m.cfg.targets {
+		go func(t target) {
+			errCh <- m.watchTarget(ctx, t)
+		}(t)
 	}
 	// wait for first error or context cancel
 	select {
@@ -345,72 +422,109 @@ func (m *forwardManager) watchAndSync(ctx context.Context) error {
 	}
 }
 
-func (m *forwardManager) watchTarget(ctx context.Context, idx int, t target) error {
-	// wildcard port: expand into one sub-target per service port
-	if t.remotePort == 0 {
-		ports, err := m.client.resolveServicePorts(ctx, t.namespace, t.resourceName)
-		if err != nil {
-			return err
-		}
-		if len(ports) == 0 {
-			return fmt.Errorf("service %q has no ports", t.resourceName)
-		}
-		m.logger.Info("expanding wildcard ports", "svc", t.resourceName, "ports", ports)
-
-		// register sub-targets in forwardManager so they get their own nextPort slots
-		m.mu.Lock()
-		baseIdx := len(m.cfg.targets)
-		for i, remotePort := range ports {
-			sub := target{
-				namespace:    t.namespace,
-				resourceKind: t.resourceKind,
-				resourceName: t.resourceName,
-				localPort:    t.localPort + i,
-				remotePort:   remotePort,
-			}
-			m.cfg.targets = append(m.cfg.targets, sub)
-			m.nextPorts[baseIdx+i] = sub.localPort
-		}
-		m.mu.Unlock()
-
-		errCh := make(chan error, len(ports))
-		for i := range ports {
-			go func(subIdx int) {
-				errCh <- m.watchTarget(ctx, subIdx, m.cfg.targets[subIdx])
-			}(baseIdx + i)
-		}
-		select {
-		case err := <-errCh:
-			return err
-		case <-ctx.Done():
-			return nil
-		}
-	}
-
-	if t.resourceKind == resourcePod {
+func (m *forwardManager) watchTarget(ctx context.Context, t target) error {
+	switch t.resourceKind {
+	case resourcePod:
 		pod, err := m.client.getPod(ctx, t.namespace, t.resourceName, m.logger)
 		if err != nil {
 			return err
 		}
-		m.addPod(ctx, pod, idx)
+		if err := m.addPod(ctx, pod, t); err != nil {
+			return err
+		}
 		<-ctx.Done()
 		return nil
+	case resourceService:
+		if t.resourceName == "*" {
+			return m.watchAllServices(ctx, t)
+		}
+		selector, err := m.client.resolveService(ctx, t.namespace, t.resourceName)
+		if err != nil {
+			return err
+		}
+		return m.watchSelector(ctx, t, selector)
+	case resourceDeployment:
+		selector, err := m.client.resolveDeployment(ctx, t.namespace, t.resourceName)
+		if err != nil {
+			return err
+		}
+		return m.watchSelector(ctx, t, selector)
+	default:
+		return fmt.Errorf("unsupported resource kind %d", t.resourceKind)
 	}
+}
 
-	// service: resolve selector and watch pods
-	selector, err := m.client.resolveService(ctx, t.namespace, t.resourceName)
+func (m *forwardManager) watchAllServices(ctx context.Context, parent target) error {
+	services, err := m.client.listServices(ctx, parent.namespace)
 	if err != nil {
 		return err
 	}
-	m.logger.Info("resolved service", "svc", t.resourceName, "selector", selector.String())
+	eligible := 0
+	for i := range services {
+		svc := &services[i]
+		if len(svc.Spec.Selector) == 0 {
+			m.logger.Info("skipping service without pod selector", "svc", svc.Name)
+			continue
+		}
+		eligible++
+		t := parent
+		t.resourceName = svc.Name
+		selector := labels.SelectorFromSet(svc.Spec.Selector)
+		go func() {
+			if err := m.watchSelector(ctx, t, selector); err != nil && ctx.Err() == nil {
+				m.logger.Warn("skipping service",
+					"svc", t.resourceName,
+					"err", err,
+				)
+			}
+		}()
+	}
+	m.logger.Info("watching all services",
+		"namespace", parent.namespace,
+		"services", eligible,
+	)
+	<-ctx.Done()
+	return nil
+}
 
+func (m *forwardManager) watchSelector(ctx context.Context, t target, selector labels.Selector) error {
 	pods, err := m.client.listPods(ctx, t.namespace, selector)
 	if err != nil {
 		return err
 	}
-	m.logger.Info("found pods", "count", len(pods), "svc", t.resourceName)
+
+	targets := []target{t}
+	if t.remotePort == 0 {
+		if len(pods) == 0 {
+			return fmt.Errorf("%s has no running pods", t.resourceStr())
+		}
+		ports := containerPorts(&pods[0])
+		if len(ports) == 0 {
+			return fmt.Errorf("%s has no containerPorts in matching pods", t.resourceStr())
+		}
+		targets = make([]target, len(ports))
+		for i, remotePort := range ports {
+			targets[i] = t
+			targets[i].localPort = t.localPort + i
+			targets[i].remotePort = remotePort
+		}
+		m.logger.Info("expanding wildcard ports",
+			"resource", t.resourceStr(),
+			"ports", ports,
+		)
+	}
+
+	m.logger.Info("resolved resource",
+		"resource", t.resourceStr(),
+		"selector", selector.String(),
+		"pods", len(pods),
+	)
 	for i := range pods {
-		m.addPod(ctx, &pods[i], idx)
+		for _, concreteTarget := range targets {
+			if err := m.addPod(ctx, &pods[i], concreteTarget); err != nil {
+				return err
+			}
+		}
 	}
 
 	events, err := m.client.watchPods(ctx, t.namespace, selector)
@@ -435,16 +549,41 @@ func (m *forwardManager) watchTarget(ctx context.Context, idx int, t target) err
 			case podAdded:
 				if !knownRunning[ev.pod.Name] {
 					knownRunning[ev.pod.Name] = true
-					m.logger.Info("new pod detected", "pod", ev.pod.Name, "svc", t.resourceName)
-					m.addPod(ctx, ev.pod, idx)
+					m.logger.Info("new pod detected",
+						"pod", ev.pod.Name,
+						"resource", t.resourceStr(),
+					)
+					for _, concreteTarget := range targets {
+						if err := m.addPod(ctx, ev.pod, concreteTarget); err != nil {
+							return err
+						}
+					}
 				}
 			case podDeleted:
 				if knownRunning[ev.pod.Name] {
 					delete(knownRunning, ev.pod.Name)
-					m.removePod(ev.pod.Name)
+					for _, concreteTarget := range targets {
+						m.removePodOwner(ev.pod.Namespace, ev.pod.Name, concreteTarget)
+					}
 				}
 			}
 		}
 	}
 }
 
+func containerPorts(pod *corev1.Pod) []int {
+	seen := map[int]struct{}{}
+	var ports []int
+	for _, container := range pod.Spec.Containers {
+		for _, p := range container.Ports {
+			port := int(p.ContainerPort)
+			if _, exists := seen[port]; exists {
+				continue
+			}
+			seen[port] = struct{}{}
+			ports = append(ports, port)
+		}
+	}
+	sort.Ints(ports)
+	return ports
+}

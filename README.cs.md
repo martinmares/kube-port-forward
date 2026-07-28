@@ -6,8 +6,11 @@ Správce Kubernetes port-forward s automatickým reconnectem a živým webovým 
 
 - **Auto-reconnect** — automaticky restartuje port-forward při výpadku spojení
 - **Podpora Service** — rozloží Service na všechny backing pody a každý namapuje na samostatný lokální port
+- **Podpora Deploymentů** — načte selector Deploymentu a sleduje všechny jeho běžící pody
+- **Discovery celého namespace** — `svc/*` forwarduje všechny použitelné Services v namespace
 - **Dynamické sledování** — detekuje nové nebo odstraněné pody v reálném čase; nové pody dostávají nový lokální port automaticky
 - **Wildcard porty** — `9091:*` expanduje na všechny `containerPort` hodnoty deklarované v pod spec
+- **Alokace bez kolizí** — lokální porty jsou rezervovány globálně napříč resources a porty podů
 - **Více resources najednou** — forwardování více services nebo podů jedním příkazem
 - **Webové UI** — živá stránka v prohlížeči se stavem podů, metadaty, proklikem a kopírováním, auto-refresh přes SSE
 - **Autodetekce namespace** — čte výchozí namespace z `~/.kube/config` pokud není zadán přepínač `-n`
@@ -30,7 +33,7 @@ sudo cp kube-port-forward /usr/local/bin/
 ## Použití
 
 ```
-kube-port-forward [OPTIONS] -n <namespace> <pod|svc>/<name> <localPort>:<remotePort|*> [...]
+kube-port-forward [OPTIONS] -n <namespace> <pod|svc|deploy>/<name> <localPort>:<remotePort|*> [...]
 ```
 
 ### Přepínače
@@ -43,6 +46,7 @@ kube-port-forward [OPTIONS] -n <namespace> <pod|svc>/<name> <localPort>:<remoteP
 | `--log-level` | `info` | Úroveň logování: `debug`, `info`, `warn`, `error` |
 | `--web-port` | `9999` | Lokální port pro webové UI |
 | `--no-open` | vypnuto | Zakáže automatické otevření prohlížeče při startu |
+| `--insecure` | vypnuto | Přeskočí ověření TLS certifikátu Kubernetes API serveru |
 
 ### Syntaxe mapování portů
 
@@ -50,6 +54,9 @@ kube-port-forward [OPTIONS] -n <namespace> <pod|svc>/<name> <localPort>:<remoteP
 |---------|--------|
 | `9091:9090` | Forwarduj lokální `9091` na pod port `9090` (explicitní) |
 | `9091:*` | Forwarduj od lokálního `9091` na **všechny** `containerPort` hodnoty v pod spec |
+
+Lokální porty se přidělují globálně od požadované hodnoty směrem nahoru k prvnímu volnému
+portu. Tím se zabrání kolizím mezi replikami, resources a wildcard porty.
 
 > **Důležité:** `localPort:remotePort` vždy tuneluje přímo na **POD**, ne přes Service routing.
 > `remotePort` tedy odkazuje na port, který POD skutečně poslouchá (`containerPort`),
@@ -79,6 +86,20 @@ kube-port-forward -n nac-app svc/nac-out 9091:*
 #   127.0.0.1:9092 → pod:9090
 ```
 
+Přesměrování všech podů vlastněných Deploymentem bez nutnosti existence Service:
+```bash
+kube-port-forward -n nac-app deploy/nac-out 9091:*
+```
+
+Automatické nalezení všech Services s pod selectorem v namespace:
+```bash
+kube-port-forward -n nac-app 'svc/*' 10000:*
+```
+
+Services bez pod selectoru se přeskočí. Při použití wildcard portů se zalogují a přeskočí také
+Services bez běžících podů nebo deklarovaných `containerPort`. Pokud více Services vybere stejný
+pod a vzdálený port, použije se jeden sdílený forward.
+
 Přesměrování více services jedním příkazem:
 ```bash
 kube-port-forward -n nac-app svc/foo 9091:9090 svc/bar 9093:8080
@@ -88,6 +109,14 @@ Omezení počtu pokusů, vlastní interval, bez prohlížeče:
 ```bash
 kube-port-forward --retries 5 --retry-interval 10 --no-open -n nac-app svc/nac-out 9091:9090
 ```
+
+Připojení ke clusteru, jehož certifikát API serveru nelze ověřit:
+```bash
+kube-port-forward --insecure -n nac-app pod/nac-out-6c7985556d-h2cns 9090:9090
+```
+
+> **Varování:** `--insecure` vypne ověřování TLS certifikátu API serveru. Používejte jej pouze
+> pro clustery, kterým důvěřujete.
 
 ## Webové UI
 

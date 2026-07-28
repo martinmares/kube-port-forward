@@ -6,8 +6,11 @@ A Kubernetes port-forward manager with automatic reconnect and a live web UI.
 
 - **Auto-reconnect** — restarts port-forward automatically when the connection drops
 - **Service support** — resolves a Service to all backing pods and forwards each on a separate local port
+- **Deployment support** — resolves a Deployment selector and follows all of its running pods
+- **Namespace-wide discovery** — `svc/*` forwards all usable Services in a namespace
 - **Dynamic watch** — detects new or removed pods in real time; new pods get a new local port automatically
 - **Wildcard ports** — `9091:*` expands to all `containerPort` values declared in the pod spec
+- **Collision-free allocation** — local ports are reserved globally across all resources and pod ports
 - **Multiple resources** — forward several services or pods in a single command
 - **Web UI** — live browser page with pod status, metadata, one-click open/copy, auto-refresh via SSE
 - **Namespace autodetect** — reads default namespace from `~/.kube/config` if `-n` is omitted
@@ -30,7 +33,7 @@ sudo cp kube-port-forward /usr/local/bin/
 ## Usage
 
 ```
-kube-port-forward [OPTIONS] -n <namespace> <pod|svc>/<name> <localPort>:<remotePort|*> [...]
+kube-port-forward [OPTIONS] -n <namespace> <pod|svc|deploy>/<name> <localPort>:<remotePort|*> [...]
 ```
 
 ### Options
@@ -43,6 +46,7 @@ kube-port-forward [OPTIONS] -n <namespace> <pod|svc>/<name> <localPort>:<remoteP
 | `--log-level` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
 | `--web-port` | `9999` | Local port for the web UI |
 | `--no-open` | off | Disable automatic browser opening on start |
+| `--insecure` | off | Skip Kubernetes API server TLS certificate verification |
 
 ### Port mapping syntax
 
@@ -50,6 +54,9 @@ kube-port-forward [OPTIONS] -n <namespace> <pod|svc>/<name> <localPort>:<remoteP
 |--------|---------|
 | `9091:9090` | Forward local `9091` to pod port `9090` (explicit) |
 | `9091:*` | Forward starting from local `9091` to **all** `containerPort` values in the pod spec |
+
+Local ports are allocated globally, starting at the requested value and moving upward to the
+next unused port. This prevents collisions across replicas, resources, and wildcard ports.
 
 > **Important:** `localPort:remotePort` always tunnels directly to the **pod**, not through the
 > Service. This means `remotePort` refers to what the pod actually listens on (`containerPort`),
@@ -79,6 +86,20 @@ kube-port-forward -n nac-app svc/nac-out 9091:*
 #   127.0.0.1:9092 → pod:9090
 ```
 
+Forward all pods owned by a Deployment, without requiring a Service:
+```bash
+kube-port-forward -n nac-app deploy/nac-out 9091:*
+```
+
+Discover all Services with pod selectors in a namespace:
+```bash
+kube-port-forward -n nac-app 'svc/*' 10000:*
+```
+
+Services without pod selectors are skipped. Services without running pods or declared
+`containerPort` values are logged and skipped when wildcard ports are requested. If multiple
+Services select the same pod and remote port, one shared forward is used.
+
 Forward multiple services in one command:
 ```bash
 kube-port-forward -n nac-app svc/foo 9091:9090 svc/bar 9093:8080
@@ -88,6 +109,14 @@ Limit retries, custom interval, no browser:
 ```bash
 kube-port-forward --retries 5 --retry-interval 10 --no-open -n nac-app svc/nac-out 9091:9090
 ```
+
+Connect to a cluster whose API server certificate cannot be verified:
+```bash
+kube-port-forward --insecure -n nac-app pod/nac-out-6c7985556d-h2cns 9090:9090
+```
+
+> **Warning:** `--insecure` disables verification of the API server's TLS certificate. Use it
+> only for clusters you trust.
 
 ## Web UI
 

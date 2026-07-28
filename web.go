@@ -280,6 +280,7 @@ function render(state) {
         '<div class="pod-port">127.0.0.1:<strong>' + pod.localPort + '</strong> → ' + pod.remotePort +
           (pod.attempt > 1 ? ' &nbsp;·&nbsp; attempt ' + pod.attempt : '') + '</div>' +
         '<div class="pod-meta">' +
+          tag('resource', pod.resource || '—', 'ok') +
           tag('ready', pod.ready, 'ok') +
           '<span class="meta-tag">restarts<span class="' + restartsClass + '">' + pod.restarts + '</span></span>' +
           tag('ip', pod.podIP || '—', 'ok') +

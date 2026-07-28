@@ -21,6 +21,7 @@ type resourceType int
 const (
 	resourcePod resourceType = iota
 	resourceService
+	resourceDeployment
 )
 
 // target represents one forwarding target: namespace + resource + ports.
@@ -33,10 +34,14 @@ type target struct {
 }
 
 func (t *target) resourceStr() string {
-	if t.resourceKind == resourceService {
+	switch t.resourceKind {
+	case resourceService:
 		return "svc/" + t.resourceName
+	case resourceDeployment:
+		return "deploy/" + t.resourceName
+	default:
+		return "pod/" + t.resourceName
 	}
-	return "pod/" + t.resourceName
 }
 
 type config struct {
@@ -46,6 +51,7 @@ type config struct {
 	logLevel      slog.Level
 	webPort       int
 	openBrowser   bool
+	insecure      bool
 }
 
 // defaultNamespace returns the current-context namespace from kubeconfig, or "".
@@ -65,6 +71,7 @@ func parseArgs() (*config, error) {
 		logLevelStr   string
 		webPort       int
 		noOpen        bool
+		insecure      bool
 	)
 
 	defNS := defaultNamespace()
@@ -74,15 +81,18 @@ func parseArgs() (*config, error) {
 	}
 
 	cmd := &cobra.Command{
-		Use:   "kube-port-forward [OPTIONS] <pod|svc>/<name> <localPort>:<remotePort> [...]",
+		Use:   "kube-port-forward [OPTIONS] <pod|svc|deploy>/<name> <localPort>:<remotePort> [...]",
 		Short: "Port-forward manager with auto-reconnect and web UI",
 		Long: `Port-forward manager with auto-reconnect and web UI.
 Multiple resources can be specified by repeating <resource> <ports> pairs.`,
 		Example: `  kube-port-forward -n nac-app pod/nac-out-xxx 9090:9090
   kube-port-forward -n nac-app svc/nac-out 9091:9090
   kube-port-forward -n nac-app svc/nac-out 9091:*
+  kube-port-forward -n nac-app deploy/nac-out 9091:*
+  kube-port-forward -n nac-app 'svc/*' 10000:*
   kube-port-forward -n nac-app svc/foo 9091:9090 svc/bar 9093:8080
   kube-port-forward --retries 5 --retry-interval 10 -n nac-app svc/nac-out 9091:9090
+  kube-port-forward --insecure -n nac-app pod/nac-out-xxx 9090:9090
   kube-port-forward -n nac-app svc/nac-out 9091:9090 --no-open`,
 		Args:         cobra.ArbitraryArgs,
 		SilenceUsage: true,
@@ -94,6 +104,7 @@ Multiple resources can be specified by repeating <resource> <ports> pairs.`,
 	cmd.Flags().StringVar(&logLevelStr, "log-level", "info", "log verbosity: debug, info, warn, error")
 	cmd.Flags().IntVar(&webPort, "web-port", defaultWebPort, "local port for the web UI")
 	cmd.Flags().BoolVar(&noOpen, "no-open", false, "disable automatic browser opening on start")
+	cmd.Flags().BoolVar(&insecure, "insecure", false, "skip Kubernetes API server TLS certificate verification")
 
 	var cfg *config
 	var parseErr error
@@ -120,8 +131,11 @@ Multiple resources can be specified by repeating <resource> <ports> pairs.`,
 			if err != nil {
 				return err
 			}
-			if remotePort == 0 && kind != resourceService {
-				return fmt.Errorf("wildcard port (*) is only supported for services, not pods")
+			if remotePort == 0 && kind == resourcePod {
+				return fmt.Errorf("wildcard port (*) is only supported for services and deployments, not pods")
+			}
+			if name == "*" && kind != resourceService {
+				return fmt.Errorf("resource wildcard (*) is only supported for services")
 			}
 			targets = append(targets, target{
 				namespace:    namespace,
@@ -154,6 +168,7 @@ Multiple resources can be specified by repeating <resource> <ports> pairs.`,
 			logLevel:      logLevel,
 			webPort:       webPort,
 			openBrowser:   !noOpen,
+			insecure:      insecure,
 		}
 		return nil
 	}
@@ -178,19 +193,21 @@ Multiple resources can be specified by repeating <resource> <ports> pairs.`,
 func parseResource(s string) (resourceType, string, error) {
 	parts := strings.SplitN(s, "/", 2)
 	if len(parts) != 2 || parts[1] == "" {
-		return 0, "", fmt.Errorf("invalid resource %q: expected pod/<name> or svc/<name>", s)
+		return 0, "", fmt.Errorf("invalid resource %q: expected pod/<name>, svc/<name>, or deploy/<name>", s)
 	}
 	switch strings.ToLower(parts[0]) {
 	case "pod", "pods":
 		return resourcePod, parts[1], nil
 	case "svc", "service", "services":
 		return resourceService, parts[1], nil
+	case "deploy", "deployment", "deployments":
+		return resourceDeployment, parts[1], nil
 	default:
-		return 0, "", fmt.Errorf("unsupported resource type %q: use pod or svc", parts[0])
+		return 0, "", fmt.Errorf("unsupported resource type %q: use pod, svc, or deploy", parts[0])
 	}
 }
 
-// parsePorts parses "localPort:remotePort" or "localPort:*" (all service ports).
+// parsePorts parses "localPort:remotePort" or "localPort:*" (all declared pod ports).
 // remotePort=0 means "all ports".
 func parsePorts(s string) (int, int, error) {
 	parts := strings.SplitN(s, ":", 2)

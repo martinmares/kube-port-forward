@@ -12,9 +12,12 @@ import (
 func run(ctx context.Context, logger *slog.Logger, cfg *config) error {
 	// use first target's namespace for cluster connection (just needs any valid ns)
 	ns := cfg.targets[0].namespace
-	client, err := newK8sClient(ns)
+	client, err := newK8sClient(ns, cfg.insecure)
 	if err != nil {
 		return fmt.Errorf("failed to connect to cluster: %w", err)
+	}
+	if cfg.insecure {
+		logger.Warn("TLS certificate verification is disabled")
 	}
 
 	namespaces := make([]string, 0, len(cfg.targets))
@@ -82,4 +85,3 @@ func openBrowser(url string) error {
 	}
 	return exec.Command(cmd, args...).Start()
 }
-
