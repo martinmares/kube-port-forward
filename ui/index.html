@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en" data-bs-theme="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>kube-port-forward</title>
+  <link rel="stylesheet" href="/static/css/tabler.min.css">
+  <link rel="stylesheet" href="/static/css/tabler-icons.min.css">
+  <link rel="stylesheet" href="/static/css/app.css?v=2">
+  <script>
+    (() => {
+      const theme = localStorage.getItem('theme') || 'auto';
+      const dark = theme === 'dark' || (theme === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      document.documentElement.setAttribute('data-bs-theme', dark ? 'dark' : 'light');
+    })();
+  </script>
+</head>
+<body class="antialiased">
+<div class="page">
+  <header class="navbar navbar-expand-md d-print-none app-navbar">
+    <div class="container-xl app-container">
+      <div class="navbar-brand navbar-brand-autodark d-flex align-items-center gap-2 m-0">
+        <span class="app-brand-mark" aria-hidden="true"><i class="ti ti-arrows-exchange"></i></span>
+        <span>kube-port-forward</span>
+      </div>
+
+      <div class="navbar-nav flex-row order-md-last align-items-center gap-2 ms-auto">
+        <span id="cluster-pill" class="badge bg-secondary-lt text-secondary cluster-pill" title="Kubernetes cluster">
+          <span class="status-dot status-dot-animated bg-secondary me-1"></span>
+          <span id="cluster-pill-label">Connecting…</span>
+        </span>
+        <div class="nav-item dropdown">
+          <button class="nav-link px-1 border-0 bg-transparent" type="button" data-bs-toggle="dropdown"
+                  aria-label="Select color theme" title="Color theme">
+            <i id="theme-icon" class="ti ti-device-desktop"></i>
+          </button>
+          <div class="dropdown-menu dropdown-menu-end dropdown-menu-arrow">
+            <button class="dropdown-item" type="button" data-theme="light"><i class="ti ti-sun me-2"></i>Light</button>
+            <button class="dropdown-item" type="button" data-theme="dark"><i class="ti ti-moon me-2"></i>Dark</button>
+            <button class="dropdown-item" type="button" data-theme="auto"><i class="ti ti-device-desktop me-2"></i>Auto</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div class="page-wrapper">
+    <div class="page-header d-print-none">
+      <div class="container-xl app-container">
+        <div class="row g-2 align-items-end">
+          <div class="col min-w-0">
+            <div class="page-pretitle">Live Kubernetes tunnels</div>
+            <h1 class="page-title">Port forwards</h1>
+            <div id="cluster-summary" class="text-secondary mt-1 text-truncate">Waiting for cluster state…</div>
+          </div>
+          <div class="col-12 col-lg-auto">
+            <div id="resource-summary" class="d-flex flex-wrap gap-1 justify-content-lg-end"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="page-body">
+      <div class="container-xl app-container">
+        <div id="connection-alert" class="alert alert-warning d-none align-items-center gap-3" role="alert" aria-live="polite">
+          <i class="ti ti-plug-connected-x fs-2 text-warning flex-shrink-0"></i>
+          <div>
+            <div class="fw-semibold">Live updates disconnected</div>
+            <div class="text-secondary small">Trying to reconnect to the local event stream…</div>
+          </div>
+        </div>
+
+        <div class="row row-cards mb-3" aria-label="Forward status summary">
+          <div class="col-6 col-lg-3">
+            <div class="card metric-card h-100">
+              <div class="card-body p-3 d-flex align-items-center gap-3">
+                <span class="avatar bg-green-lt text-green"><i class="ti ti-plug-connected fs-2"></i></span>
+                <div><div id="metric-forwarding" class="h2 mb-0">0</div><div class="text-secondary small">Forwarding</div></div>
+              </div>
+            </div>
+          </div>
+          <div class="col-6 col-lg-3">
+            <div class="card metric-card h-100">
+              <div class="card-body p-3 d-flex align-items-center gap-3">
+                <span class="avatar bg-blue-lt text-blue"><i class="ti ti-loader-2 fs-2"></i></span>
+                <div><div id="metric-connecting" class="h2 mb-0">0</div><div class="text-secondary small">Connecting</div></div>
+              </div>
+            </div>
+          </div>
+          <div class="col-6 col-lg-3">
+            <div class="card metric-card h-100">
+              <div class="card-body p-3 d-flex align-items-center gap-3">
+                <span class="avatar bg-yellow-lt text-yellow"><i class="ti ti-refresh fs-2"></i></span>
+                <div><div id="metric-reconnecting" class="h2 mb-0">0</div><div class="text-secondary small">Reconnecting</div></div>
+              </div>
+            </div>
+          </div>
+          <div class="col-6 col-lg-3">
+            <div class="card metric-card h-100">
+              <div class="card-body p-3 d-flex align-items-center gap-3">
+                <span class="avatar bg-secondary-lt text-secondary"><i class="ti ti-history fs-2"></i></span>
+                <div><div id="metric-terminated" class="h2 mb-0">0</div><div class="text-secondary small">History</div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card forwards-card">
+          <div class="card-header">
+            <div>
+              <h2 class="card-title mb-1">Forwarded endpoints</h2>
+              <div class="text-secondary small"><span id="visible-count">0</span> visible tunnels</div>
+            </div>
+          </div>
+
+          <div class="card-body border-bottom py-3">
+            <div class="row g-2 align-items-center">
+              <div class="col-12 col-lg">
+                <div class="input-icon">
+                  <span class="input-icon-addon"><i class="ti ti-search"></i></span>
+                  <input id="forward-search" type="search" class="form-control" autocomplete="off"
+                         placeholder="Search pod, resource, port, node or IP" aria-label="Search forwards">
+                </div>
+              </div>
+              <div class="col-6 col-md-4 col-lg-auto">
+                <select id="status-filter" class="form-select" aria-label="Filter by status">
+                  <option value="all">All active states</option>
+                  <option value="forwarding">Forwarding</option>
+                  <option value="connecting">Connecting</option>
+                  <option value="reconnecting">Reconnecting</option>
+                  <option value="terminated">Terminated</option>
+                </select>
+              </div>
+              <div class="col-6 col-md-4 col-lg-auto">
+                <select id="resource-filter" class="form-select resource-filter" aria-label="Filter by resource">
+                  <option value="all">All resources</option>
+                </select>
+              </div>
+              <div class="col-12 col-md-4 col-lg-auto">
+                <label class="form-check form-switch m-0 history-switch">
+                  <input id="show-history" class="form-check-input" type="checkbox">
+                  <span class="form-check-label">Show history</span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div id="forwards-mobile" class="d-md-none mobile-forward-list">
+            <div class="empty py-5">
+              <div class="empty-icon"><span class="spinner-border spinner-border-sm" role="status"></span></div>
+              <p class="empty-title">Waiting for forwards</p>
+            </div>
+          </div>
+
+          <div class="table-responsive d-none d-md-block">
+            <table class="table table-vcenter card-table table-hover forwards-table">
+              <thead>
+                <tr>
+                  <th class="status-column">Status</th>
+                  <th class="resource-column">Resource</th>
+                  <th class="pod-column">Pod</th>
+                  <th class="port-column">Port forward</th>
+                  <th class="ready-column d-none d-xl-table-cell">Ready</th>
+                  <th class="node-column d-none d-xxl-table-cell">Node / IP</th>
+                  <th class="age-column d-none d-xxl-table-cell">Age</th>
+                  <th class="actions-column"><span class="visually-hidden">Actions</span></th>
+                </tr>
+              </thead>
+              <tbody id="forwards-body">
+                <tr><td colspan="8">
+                  <div class="empty py-5">
+                    <div class="empty-icon"><span class="spinner-border spinner-border-sm" role="status"></span></div>
+                    <p class="empty-title">Waiting for forwards</p>
+                    <p class="empty-subtitle text-secondary">The first live state will appear here.</p>
+                  </div>
+                </td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <footer class="footer footer-transparent d-print-none">
+      <div class="container-xl app-container">
+        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 text-secondary small py-1">
+          <span>kube-port-forward</span>
+          <span id="live-state" class="d-flex align-items-center gap-2" aria-live="polite">
+            <span class="status-dot status-dot-animated bg-secondary"></span>
+            Connecting to live updates…
+          </span>
+        </div>
+      </div>
+    </footer>
+  </div>
+</div>
+
+<div class="toast-container position-fixed bottom-0 end-0 p-3">
+  <div id="copy-toast" class="toast" role="status" aria-live="polite" aria-atomic="true">
+    <div class="toast-body d-flex align-items-center gap-2">
+      <i class="ti ti-copy-check text-green"></i>
+      <span>Endpoint URL copied to clipboard.</span>
+    </div>
+  </div>
+</div>
+
+<script src="/static/js/tabler.min.js"></script>
+<script src="/static/js/app.js?v=2"></script>
+</body>
+</html>
