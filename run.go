@@ -10,8 +10,7 @@ import (
 )
 
 func run(ctx context.Context, logger *slog.Logger, cfg *config) error {
-	// use first target's namespace for cluster connection (just needs any valid ns)
-	ns := cfg.targets[0].namespace
+	ns := cfg.namespace
 	client, err := newK8sClient(ns, cfg.insecure)
 	if err != nil {
 		return fmt.Errorf("failed to connect to cluster: %w", err)
@@ -28,6 +27,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config) error {
 			namespaces = append(namespaces, t.namespace)
 		}
 	}
+	if len(namespaces) == 0 {
+		namespaces = append(namespaces, cfg.namespace)
+	}
 	logger.Info("connected to cluster",
 		"context", client.info.ContextName,
 		"server", client.info.ServerURL,
@@ -35,7 +37,13 @@ func run(ctx context.Context, logger *slog.Logger, cfg *config) error {
 	)
 
 	manager := newForwardManager(cfg, client, logger)
-	webSrv := newWebServer(manager, client, cfg, logger)
+	diagnosticManager := newDiagnosticManager(ctx, cfg, client, logger, manager.notifyClients)
+	defer func() {
+		if err := diagnosticManager.stop(); err != nil {
+			logger.Warn("diagnostic gateway cleanup failed", "err", err)
+		}
+	}()
+	webSrv := newWebServer(manager, diagnosticManager, client, cfg, logger)
 
 	// start web server
 	webErrCh := make(chan error, 1)

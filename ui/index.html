@@ -5,16 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
   <title>Kube Port Forward</title>
+  <script src="/static/js/theme.js?v=1"></script>
   <link rel="stylesheet" href="/static/css/tabler.min.css">
   <link rel="stylesheet" href="/static/css/tabler-icons.min.css">
-  <link rel="stylesheet" href="/static/css/app.css?v=2">
-  <script>
-    (() => {
-      const theme = localStorage.getItem('theme') || 'auto';
-      const dark = theme === 'dark' || (theme === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-      document.documentElement.setAttribute('data-bs-theme', dark ? 'dark' : 'light');
-    })();
-  </script>
+  <link rel="stylesheet" href="/static/css/app.css?v=4">
 </head>
 <body class="antialiased">
 <div class="page">
@@ -105,6 +99,156 @@
             </div>
           </div>
         </div>
+
+        <section id="diagnostic-card" class="card diagnostic-card mb-3">
+          <div class="card-header">
+            <div class="d-flex align-items-center gap-3 min-w-0">
+              <span class="avatar bg-purple-lt text-purple"><i class="ti ti-stethoscope fs-2"></i></span>
+              <div class="min-w-0">
+                <h2 class="card-title mb-1">Diagnostic gateway</h2>
+                <div id="diagnostic-subtitle" class="text-secondary small text-truncate">Loading diagnostic configuration…</div>
+              </div>
+            </div>
+            <div class="d-flex align-items-center gap-2 ms-auto">
+              <span id="diagnostic-status" class="badge bg-secondary-lt text-secondary">Stopped</span>
+              <button id="diagnostic-stop" class="btn btn-outline-danger btn-sm d-none" type="button">
+                <i class="ti ti-player-stop me-1"></i><span>Stop gateway</span>
+              </button>
+            </div>
+          </div>
+
+          <div id="diagnostic-unconfigured" class="card-body d-none">
+            <div class="alert alert-info mb-0">
+              <div class="d-flex gap-3">
+                <i class="ti ti-file-settings fs-2 flex-shrink-0"></i>
+                <div>
+                  <div class="fw-semibold">Diagnostic gateway is not configured</div>
+                  <div class="text-secondary">Start kube-port-forward with <code>--diagnostic-config &lt;profile.yaml&gt;</code> to enable it.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="diagnostic-content" class="d-none">
+            <div id="diagnostic-error" class="alert alert-danger m-3 mb-0 d-none" role="alert"></div>
+
+            <form id="diagnostic-config-form" class="card-body border-bottom">
+              <div class="row g-3">
+                <div class="col-12 col-xl-7">
+                  <label class="form-label" for="diagnostic-image">Proxy image</label>
+                  <input id="diagnostic-image" class="form-control font-monospace" required
+                         placeholder="registry.example.com/tools/kube-port-forward-proxy:1.0.0">
+                </div>
+                <div class="col-6 col-md-3 col-xl-2">
+                  <label class="form-label" for="diagnostic-pull-policy">Pull policy</label>
+                  <select id="diagnostic-pull-policy" class="form-select">
+                    <option>Always</option>
+                    <option selected>IfNotPresent</option>
+                    <option>Never</option>
+                  </select>
+                </div>
+                <div class="col-6 col-md-3 col-xl-3">
+                  <label class="form-label" for="diagnostic-ttl">Maximum lifetime</label>
+                  <input id="diagnostic-ttl" class="form-control" required placeholder="8h">
+                </div>
+                <div class="col-12">
+                  <details class="diagnostic-settings">
+                    <summary class="text-primary">Policy and advanced settings</summary>
+                    <div class="row g-3 pt-3">
+                      <div class="col-12 col-xl-8">
+                        <label class="form-label" for="diagnostic-policy">Egress policy</label>
+                        <textarea id="diagnostic-policy" class="form-control font-monospace policy-editor" rows="12" required
+                                  spellcheck="false" aria-describedby="diagnostic-policy-help"></textarea>
+                        <div id="diagnostic-policy-help" class="form-hint">Deny rules override allow rules. Hostnames are resolved and checked inside the cluster.</div>
+                      </div>
+                      <div class="col-12 col-xl-4">
+                        <div class="row g-3">
+                          <div class="col-6 col-xl-12">
+                            <label class="form-label" for="diagnostic-max-connections">Maximum connections</label>
+                            <input id="diagnostic-max-connections" class="form-control" type="number" min="1" max="4096" required>
+                          </div>
+                          <div class="col-6 col-xl-12">
+                            <label class="form-label" for="diagnostic-connect-timeout">Connect timeout</label>
+                            <input id="diagnostic-connect-timeout" class="form-control" required placeholder="10s">
+                          </div>
+                          <div class="col-6 col-xl-12">
+                            <label class="form-label" for="diagnostic-idle-timeout">Idle timeout</label>
+                            <input id="diagnostic-idle-timeout" class="form-control" required placeholder="15m">
+                          </div>
+                          <div class="col-12">
+                            <label class="form-label" for="diagnostic-pull-secrets">Image pull secrets</label>
+                            <input id="diagnostic-pull-secrets" class="form-control" placeholder="registry-secret, second-secret">
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </details>
+                </div>
+              </div>
+              <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-3">
+                <div id="diagnostic-config-path" class="text-secondary small"></div>
+                <button id="diagnostic-start" class="btn btn-purple" type="submit">
+                  <i class="ti ti-player-play me-1"></i>Start diagnostic pod
+                </button>
+              </div>
+            </form>
+
+            <div id="diagnostic-progress" class="card-body d-none">
+              <div class="d-flex align-items-center gap-3">
+                <span class="spinner-border spinner-border-sm text-purple" role="status"></span>
+                <div>
+                  <div id="diagnostic-progress-title" class="fw-semibold">Starting diagnostic pod…</div>
+                  <div id="diagnostic-progress-detail" class="text-secondary small">Creating the ConfigMap, waiting for readiness, and opening a private Kubernetes port-forward.</div>
+                </div>
+              </div>
+            </div>
+
+            <div id="diagnostic-ready" class="d-none">
+              <form id="diagnostic-tunnel-form" class="card-body border-bottom">
+                <div class="row g-2 align-items-end">
+                  <div class="col-12 col-lg-3">
+                    <label class="form-label" for="tunnel-name">Name</label>
+                    <input id="tunnel-name" class="form-control" placeholder="Production database">
+                  </div>
+                  <div class="col-12 col-md-6 col-lg">
+                    <label class="form-label" for="tunnel-host">Cluster hostname or IP</label>
+                    <input id="tunnel-host" class="form-control font-monospace" required placeholder="postgres.nac-app.svc.cluster.local">
+                  </div>
+                  <div class="col-6 col-md-2 col-lg-2">
+                    <label class="form-label" for="tunnel-port">Target port</label>
+                    <input id="tunnel-port" class="form-control" type="number" min="1" max="65535" required placeholder="5432">
+                  </div>
+                  <div class="col-6 col-md-2 col-lg-2">
+                    <label class="form-label" for="tunnel-local-port">Local port</label>
+                    <input id="tunnel-local-port" class="form-control" type="number" min="0" max="65535" placeholder="Auto">
+                  </div>
+                  <div class="col-6 col-md-2 col-lg-auto">
+                    <label class="form-label" for="tunnel-mode">Mode</label>
+                    <select id="tunnel-mode" class="form-select">
+                      <option value="tcp">TCP</option>
+                      <option value="http">HTTP (plaintext)</option>
+                      <option value="https">HTTPS</option>
+                    </select>
+                  </div>
+                  <div class="col-6 col-md-auto">
+                    <button id="tunnel-add" class="btn btn-primary w-100" type="submit">
+                      <i class="ti ti-route-2 me-1"></i>Expose endpoint
+                    </button>
+                  </div>
+                </div>
+                <div id="tunnel-tls-options" class="form-check mt-3 d-none">
+                  <input id="tunnel-tls-skip-verify" class="form-check-input" type="checkbox">
+                  <label class="form-check-label" for="tunnel-tls-skip-verify">
+                    Skip upstream TLS certificate verification <span class="badge bg-red-lt text-red ms-1">insecure</span>
+                  </label>
+                  <div class="form-hint">Use only for a trusted internal endpoint whose certificate cannot be verified locally.</div>
+                </div>
+                <div class="form-hint mt-2">HTTP uses plaintext upstream. HTTPS sets the target Host and TLS SNI automatically. TCP keeps TLS end-to-end in your client.</div>
+              </form>
+              <div id="diagnostic-tunnels"></div>
+            </div>
+          </div>
+        </section>
 
         <div class="card forwards-card">
           <div class="card-header">
@@ -206,6 +350,6 @@
 </div>
 
 <script src="/static/js/tabler.min.js"></script>
-<script src="/static/js/app.js?v=2"></script>
+<script src="/static/js/app.js?v=4"></script>
 </body>
 </html>

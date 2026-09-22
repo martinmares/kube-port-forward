@@ -16,6 +16,38 @@
     showHistory: document.getElementById('show-history'),
     visibleCount: document.getElementById('visible-count'),
     copyToast: document.getElementById('copy-toast'),
+    diagnosticCard: document.getElementById('diagnostic-card'),
+    diagnosticSubtitle: document.getElementById('diagnostic-subtitle'),
+    diagnosticStatus: document.getElementById('diagnostic-status'),
+    diagnosticStop: document.getElementById('diagnostic-stop'),
+    diagnosticUnconfigured: document.getElementById('diagnostic-unconfigured'),
+    diagnosticContent: document.getElementById('diagnostic-content'),
+    diagnosticError: document.getElementById('diagnostic-error'),
+    diagnosticConfigForm: document.getElementById('diagnostic-config-form'),
+    diagnosticProgress: document.getElementById('diagnostic-progress'),
+    diagnosticProgressTitle: document.getElementById('diagnostic-progress-title'),
+    diagnosticProgressDetail: document.getElementById('diagnostic-progress-detail'),
+    diagnosticReady: document.getElementById('diagnostic-ready'),
+    diagnosticStart: document.getElementById('diagnostic-start'),
+    diagnosticImage: document.getElementById('diagnostic-image'),
+    diagnosticPullPolicy: document.getElementById('diagnostic-pull-policy'),
+    diagnosticTTL: document.getElementById('diagnostic-ttl'),
+    diagnosticMaxConnections: document.getElementById('diagnostic-max-connections'),
+    diagnosticConnectTimeout: document.getElementById('diagnostic-connect-timeout'),
+    diagnosticIdleTimeout: document.getElementById('diagnostic-idle-timeout'),
+    diagnosticPullSecrets: document.getElementById('diagnostic-pull-secrets'),
+    diagnosticPolicy: document.getElementById('diagnostic-policy'),
+    diagnosticConfigPath: document.getElementById('diagnostic-config-path'),
+    diagnosticTunnelForm: document.getElementById('diagnostic-tunnel-form'),
+    diagnosticTunnels: document.getElementById('diagnostic-tunnels'),
+    tunnelName: document.getElementById('tunnel-name'),
+    tunnelHost: document.getElementById('tunnel-host'),
+    tunnelPort: document.getElementById('tunnel-port'),
+    tunnelLocalPort: document.getElementById('tunnel-local-port'),
+    tunnelMode: document.getElementById('tunnel-mode'),
+    tunnelTLSOptions: document.getElementById('tunnel-tls-options'),
+    tunnelTLSSkipVerify: document.getElementById('tunnel-tls-skip-verify'),
+    tunnelAdd: document.getElementById('tunnel-add'),
   };
 
   const statusMeta = {
@@ -28,6 +60,8 @@
   let currentState = null;
   let lastUpdate = null;
   let eventStreamConnected = false;
+  let diagnosticFormLoaded = false;
+  let diagnosticRequestError = '';
 
   function escapeHTML(value) {
     return String(value ?? '')
@@ -210,6 +244,104 @@
     elements.mobile.innerHTML = pods.map(renderMobileCard).join('');
   }
 
+  function renderDiagnostic(diagnostic) {
+    const configured = Boolean(diagnostic?.configured);
+    elements.diagnosticUnconfigured.classList.toggle('d-none', configured);
+    elements.diagnosticContent.classList.toggle('d-none', !configured);
+    if (!configured) {
+      elements.diagnosticSubtitle.textContent = 'No local diagnostic profile loaded';
+      elements.diagnosticStatus.className = 'badge bg-secondary-lt text-secondary';
+      elements.diagnosticStatus.textContent = 'Unavailable';
+      return;
+    }
+
+    if (!diagnosticFormLoaded) {
+      elements.diagnosticImage.value = diagnostic.image || '';
+      elements.diagnosticPullPolicy.value = diagnostic.pullPolicy || 'IfNotPresent';
+      elements.diagnosticTTL.value = diagnostic.ttl || '8h';
+      elements.diagnosticMaxConnections.value = diagnostic.maxConnections || 64;
+      elements.diagnosticConnectTimeout.value = diagnostic.connectTimeout || '10s';
+      elements.diagnosticIdleTimeout.value = diagnostic.idleTimeout || '15m';
+      elements.diagnosticPullSecrets.value = (diagnostic.imagePullSecrets || []).join(', ');
+      elements.diagnosticPolicy.value = diagnostic.policyYAML || '';
+      elements.diagnosticConfigPath.textContent = diagnostic.configPath ? 'Loaded from ' + diagnostic.configPath : '';
+      elements.diagnosticConfigPath.title = diagnostic.configPath || '';
+      diagnosticFormLoaded = true;
+    }
+
+    const status = diagnostic.status || 'stopped';
+    const statusStyles = {
+      stopped: ['Stopped', 'badge bg-secondary-lt text-secondary'],
+      starting: ['Starting', 'badge bg-blue-lt text-blue'],
+      ready: ['Ready', 'badge bg-green-lt text-green'],
+      stopping: ['Stopping', 'badge bg-yellow-lt text-yellow'],
+      error: ['Error', 'badge bg-red-lt text-red'],
+    };
+    const statusStyle = statusStyles[status] || [status, 'badge bg-secondary-lt text-secondary'];
+    elements.diagnosticStatus.textContent = statusStyle[0];
+    elements.diagnosticStatus.className = statusStyle[1];
+    elements.diagnosticSubtitle.textContent = diagnostic.podName
+      ? diagnostic.podName + ' · ' + diagnostic.namespace
+      : 'Private cluster egress gateway · ' + diagnostic.namespace;
+    elements.diagnosticSubtitle.title = elements.diagnosticSubtitle.textContent;
+
+    const showConfig = status === 'stopped' || status === 'error';
+    const showProgress = status === 'starting' || status === 'stopping';
+    const showReady = status === 'ready';
+    elements.diagnosticConfigForm.classList.toggle('d-none', !showConfig);
+    elements.diagnosticProgress.classList.toggle('d-none', !showProgress);
+    elements.diagnosticReady.classList.toggle('d-none', !showReady);
+    elements.diagnosticStop.classList.toggle('d-none', status === 'stopped');
+    elements.diagnosticStop.disabled = status === 'stopping';
+    setDiagnosticStopBusy(status === 'stopping');
+    if (status === 'stopping') {
+      elements.diagnosticProgressTitle.textContent = 'Stopping diagnostic pod…';
+      elements.diagnosticProgressDetail.textContent = 'Waiting for Kubernetes to remove the Pod, ConfigMap, and Secret.';
+    } else {
+      elements.diagnosticProgressTitle.textContent = 'Starting diagnostic pod…';
+      elements.diagnosticProgressDetail.textContent = 'Creating the ConfigMap, waiting for readiness, and opening a private Kubernetes port-forward.';
+    }
+
+    const error = diagnosticRequestError || diagnostic.error || '';
+    elements.diagnosticError.textContent = error;
+    elements.diagnosticError.classList.toggle('d-none', !error);
+    renderDiagnosticTunnels(diagnostic.tunnels || []);
+  }
+
+  function setDiagnosticStopBusy(busy) {
+    elements.diagnosticStop.innerHTML = busy
+      ? '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span><span>Stopping…</span>'
+      : '<i class="ti ti-player-stop me-1"></i><span>Stop gateway</span>';
+  }
+
+  function renderDiagnosticTunnels(tunnels) {
+    if (!tunnels.length) {
+      elements.diagnosticTunnels.innerHTML = emptyState(
+        'ti-route-off',
+        'No exposed endpoints',
+        'Add a hostname and port above. Local ports are bound only to 127.0.0.1.'
+      );
+      return;
+    }
+    elements.diagnosticTunnels.innerHTML = '<div class="diagnostic-tunnel-list">' + tunnels.map(tunnel => {
+      const localValue = tunnel.url || tunnel.address;
+      const insecureTLS = tunnel.mode === 'https' && tunnel.tlsSkipVerify
+        ? '<span class="badge bg-red-lt text-red mt-1 ms-1">TLS verify off</span>'
+        : '';
+      const open = tunnel.url
+        ? '<a class="btn btn-sm btn-icon btn-ghost-primary" href="' + escapeHTML(tunnel.url) + '" target="_blank" rel="noopener" title="Open endpoint" aria-label="Open ' + escapeHTML(tunnel.url) + '"><i class="ti ti-external-link"></i></a>'
+        : '';
+      return '<div class="diagnostic-tunnel-item">' +
+        '<div class="min-w-0"><div class="fw-semibold text-truncate">' + escapeHTML(tunnel.name) + '</div><span class="badge bg-purple-lt text-purple mt-1">' + escapeHTML(String(tunnel.mode).toUpperCase()) + '</span>' + insecureTLS + '</div>' +
+        '<code class="diagnostic-tunnel-target" title="' + escapeHTML(tunnel.host + ':' + tunnel.port) + '">' + escapeHTML(tunnel.host) + ':' + escapeHTML(tunnel.port) + '</code>' +
+        '<code class="diagnostic-tunnel-address text-primary" title="' + escapeHTML(localValue) + '">' + escapeHTML(localValue) + '</code>' +
+        '<div class="action-list text-end">' + open +
+          '<button class="btn btn-sm btn-icon btn-ghost-secondary" type="button" data-copy-url="' + escapeHTML(localValue) + '" title="Copy local endpoint" aria-label="Copy ' + escapeHTML(localValue) + '"><i class="ti ti-copy"></i></button>' +
+          '<button class="btn btn-sm btn-icon btn-ghost-danger" type="button" data-delete-tunnel="' + escapeHTML(tunnel.id) + '" title="Stop tunnel" aria-label="Stop ' + escapeHTML(tunnel.name) + '"><i class="ti ti-trash"></i></button>' +
+        '</div></div>';
+    }).join('') + '</div>';
+  }
+
   function renderMobileCard(pod) {
     const terminated = pod.status === 'terminated';
     const restartsClass = pod.restarts === 0 ? 'text-secondary' : pod.restarts < 5 ? 'text-yellow' : 'text-red';
@@ -253,6 +385,7 @@
     const pods = state.pods || [];
     renderHeader(state);
     renderMetrics(pods);
+    renderDiagnostic(state.diagnostic || {});
     updateResourceFilter(pods);
     renderRows();
     updateLiveState();
@@ -320,7 +453,42 @@
     tabler.Toast.getOrCreateInstance(elements.copyToast, { delay: 1800 }).show();
   }
 
+  async function apiRequest(path, options = {}) {
+    const response = await fetch(path, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Kube-Port-Forward': '1',
+        ...(options.headers || {}),
+      },
+    });
+    if (!response.ok) {
+      let message = response.statusText;
+      try {
+        const body = await response.json();
+        message = body.error || message;
+      } catch (_) {
+        // Keep the HTTP status text when an intermediary returned a non-JSON response.
+      }
+      throw new Error(message);
+    }
+    if (response.status === 204) return null;
+    return response.json();
+  }
+
+  function setDiagnosticRequestError(error) {
+    diagnosticRequestError = error ? String(error.message || error) : '';
+    if (currentState) renderDiagnostic(currentState.diagnostic || {});
+  }
+
   setupTheme();
+  function updateTunnelTLSOptions() {
+    const isHTTPS = elements.tunnelMode.value === 'https';
+    elements.tunnelTLSOptions.classList.toggle('d-none', !isHTTPS);
+    if (!isHTTPS) elements.tunnelTLSSkipVerify.checked = false;
+  }
+  elements.tunnelMode.addEventListener('change', updateTunnelTLSOptions);
+  updateTunnelTLSOptions();
   [elements.search, elements.statusFilter, elements.resourceFilter, elements.showHistory].forEach(control => {
     control.addEventListener(control === elements.search ? 'input' : 'change', renderRows);
   });
@@ -328,6 +496,70 @@
     const button = event.target.closest('[data-copy-url]');
     if (!button) return;
     copyURL(button.dataset.copyUrl).catch(error => console.warn('Could not copy URL', error));
+  });
+  document.addEventListener('click', event => {
+    const button = event.target.closest('[data-delete-tunnel]');
+    if (!button) return;
+    button.disabled = true;
+    setDiagnosticRequestError(null);
+    apiRequest('/api/diagnostic/tunnels/' + encodeURIComponent(button.dataset.deleteTunnel), { method: 'DELETE' })
+      .catch(setDiagnosticRequestError)
+      .finally(() => { button.disabled = false; });
+  });
+
+  elements.diagnosticConfigForm.addEventListener('submit', event => {
+    event.preventDefault();
+    setDiagnosticRequestError(null);
+    elements.diagnosticStart.disabled = true;
+    const payload = {
+      image: elements.diagnosticImage.value.trim(),
+      pullPolicy: elements.diagnosticPullPolicy.value,
+      imagePullSecrets: elements.diagnosticPullSecrets.value.split(',').map(value => value.trim()).filter(Boolean),
+      ttl: elements.diagnosticTTL.value.trim(),
+      maxConnections: Number(elements.diagnosticMaxConnections.value),
+      connectTimeout: elements.diagnosticConnectTimeout.value.trim(),
+      idleTimeout: elements.diagnosticIdleTimeout.value.trim(),
+      policyYAML: elements.diagnosticPolicy.value,
+    };
+    apiRequest('/api/diagnostic/start', { method: 'POST', body: JSON.stringify(payload) })
+      .catch(setDiagnosticRequestError)
+      .finally(() => { elements.diagnosticStart.disabled = false; });
+  });
+
+  elements.diagnosticStop.addEventListener('click', () => {
+    setDiagnosticRequestError(null);
+    elements.diagnosticStop.disabled = true;
+    setDiagnosticStopBusy(true);
+    apiRequest('/api/diagnostic/stop', { method: 'POST', body: '{}' })
+      .catch(setDiagnosticRequestError)
+      .finally(() => {
+        elements.diagnosticStop.disabled = false;
+        if (currentState?.diagnostic?.status !== 'stopping') setDiagnosticStopBusy(false);
+      });
+  });
+
+  elements.diagnosticTunnelForm.addEventListener('submit', event => {
+    event.preventDefault();
+    setDiagnosticRequestError(null);
+    elements.tunnelAdd.disabled = true;
+    const payload = {
+      name: elements.tunnelName.value.trim(),
+      host: elements.tunnelHost.value.trim(),
+      port: Number(elements.tunnelPort.value),
+      localPort: elements.tunnelLocalPort.value ? Number(elements.tunnelLocalPort.value) : 0,
+      mode: elements.tunnelMode.value,
+      tlsSkipVerify: elements.tunnelMode.value === 'https' && elements.tunnelTLSSkipVerify.checked,
+    };
+    apiRequest('/api/diagnostic/tunnels', { method: 'POST', body: JSON.stringify(payload) })
+      .then(() => {
+        elements.tunnelName.value = '';
+        elements.tunnelHost.value = '';
+        elements.tunnelPort.value = '';
+        elements.tunnelLocalPort.value = '';
+        elements.tunnelHost.focus();
+      })
+      .catch(setDiagnosticRequestError)
+      .finally(() => { elements.tunnelAdd.disabled = false; });
   });
 
   const events = new EventSource('/events');

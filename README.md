@@ -15,6 +15,7 @@ A Kubernetes port-forward manager with automatic reconnect and a live web UI.
 - **Duplicate suppression** — shares one forward when multiple resources select the same pod and remote port
 - **Multiple resources** — forwards several targets in one process
 - **Web UI** — shows live status and metadata and provides open/copy actions
+- **Diagnostic gateway** — exposes allowlisted cluster-only TCP, HTTP, or HTTPS endpoints through a short-lived proxy pod
 - **Namespace autodetection** — reads the current-context namespace from kubeconfig
 - **No kubectl dependency** — uses the official `client-go` library directly
 
@@ -30,6 +31,8 @@ With [just](https://just.systems/) installed:
 | `just build-macos` | macOS / Apple Silicon | `dist/kube-port-forward-darwin-arm64` |
 | `just build-linux` | Linux / AMD64 | `dist/kube-port-forward-linux-amd64` |
 | `just build-win` | Windows / AMD64 | `dist/kube-port-forward-windows-amd64.exe` |
+| `just build-proxy` | Current platform | `dist/kube-port-forward-proxy` |
+| `just build-proxy-linux` | Linux / AMD64 | `dist/kube-port-forward-proxy-linux-amd64` |
 
 Alternatively, build directly with Go:
 
@@ -47,7 +50,7 @@ sudo cp dist/kube-port-forward /usr/local/bin/
 ## Usage
 
 ```text
-kube-port-forward [OPTIONS] -n <namespace> <pod|svc|deploy>/<name> <localPort>:<remotePort|*> [...]
+kube-port-forward [OPTIONS] -n <namespace> [<pod|svc|deploy>/<name> <localPort>:<remotePort|*> ...]
 ```
 
 ### Supported targets
@@ -73,6 +76,7 @@ dynamically. Services created later require restarting the application.
 | `--web-port` | `9999` | Local port for the web UI |
 | `--no-open` | off | Disables automatic browser opening |
 | `--insecure` | off | Skips Kubernetes API server TLS certificate verification |
+| `--diagnostic-config` | off | Enables the diagnostic gateway using a local YAML profile |
 
 > **Warning:** `--insecure` disables verification of the API server's TLS certificate. Use it
 > only for clusters you trust.
@@ -170,6 +174,155 @@ The page shows:
 
 The UI updates through server-sent events (SSE), without page refreshes, and reports the
 current connection state in the footer.
+
+## Diagnostic gateway
+
+The diagnostic gateway provides access to a hostname and port that is reachable only from the
+cluster. The application creates a short-lived proxy Pod, immutable policy ConfigMap, and
+ephemeral authentication Secret, opens a private Kubernetes port-forward to it, and exposes
+selected targets on `127.0.0.1`.
+
+Build and publish the proxy image to a registry available to the cluster:
+
+```bash
+just docker-build-proxy registry.example.com/tools/kube-port-forward-proxy:latest
+docker push registry.example.com/tools/kube-port-forward-proxy:latest
+```
+
+Copy [`diagnostic.example.yaml`](diagnostic.example.yaml), set the image and allow/deny rules,
+then start the application:
+
+```bash
+kube-port-forward -n nac-app \
+  --diagnostic-config ~/.config/kube-port-forward/ocp-prod.yaml
+```
+
+The profile has no schema-version field. Unknown fields are rejected to catch configuration
+mistakes. Deny rules override allow rules, and the default example denies all unmatched targets.
+Hostnames are resolved inside the cluster; every resolved IP is checked before the proxy connects
+directly to an allowed address.
+
+The UI can edit a working copy of the profile, start or stop the diagnostic Pod, test target
+connectivity, and create TCP, HTTP, or HTTPS local endpoints. Changes made in the UI do not overwrite the
+local YAML file.
+
+TCP mode provides an unmodified byte stream and keeps TLS end-to-end in the local client. HTTP mode
+uses plaintext HTTP upstream. HTTPS mode accepts local HTTP on `127.0.0.1`, connects to the target
+over TLS, and automatically sets the target HTTP `Host` and TLS SNI. Upstream certificates are
+verified by default; **Skip upstream TLS certificate verification (insecure)** is an explicit
+per-tunnel override for trusted internal endpoints. Authentication headers supplied by the local
+client are forwarded per request and are never stored or logged by the application.
+
+### End-to-end example: OpenShift Thanos API
+
+This example exposes an OpenShift Thanos/Prometheus API route from the `nac-app` namespace. It
+assumes Docker is already authenticated to `quay.in.cetin.sk`.
+
+1. Build the proxy for the cluster architecture and push it to the internal registry:
+
+   ```bash
+   docker buildx build \
+     --platform linux/amd64 \
+     -f Dockerfile.proxy \
+     -t quay.in.cetin.sk/nac_prod/kube-port-forward-proxy:latest \
+     --push .
+   ```
+
+2. Create `.tmp/diagnostic-thanos.yaml` without a schema-version field:
+
+   ```yaml
+   image: quay.in.cetin.sk/nac_prod/kube-port-forward-proxy:latest
+   pullPolicy: Always
+   imagePullSecrets:
+     - tsm-oc-pull-secret
+   ttl: 1h
+   maxConnections: 16
+   connectTimeout: 10s
+   idleTimeout: 15m
+
+   policy:
+     defaultAction: deny
+     allow:
+       - hosts:
+           - thanos-querier-openshift-monitoring.apps.ocp2.in.cetin.sk
+         ports:
+           - "443"
+   ```
+
+3. Start the application. `--insecure` is needed only when the Kubernetes API certificate cannot
+   be verified locally:
+
+   ```bash
+   ./dist/kube-port-forward \
+     --insecure \
+     -n nac-app \
+     --diagnostic-config .tmp/diagnostic-thanos.yaml
+   ```
+
+4. Open `http://127.0.0.1:9999`, click **Start diagnostic pod**, and wait for **Ready**.
+
+5. Create an endpoint in the UI with these values:
+
+   | Field | Value |
+   |-------|-------|
+   | Name | `Thanos API` |
+   | Cluster hostname or IP | `thanos-querier-openshift-monitoring.apps.ocp2.in.cetin.sk` |
+   | Target port | `443` |
+   | Local port | `18443` |
+   | Mode | `HTTPS` |
+   | Skip upstream TLS certificate verification | enabled for this internally signed route |
+
+6. Store the bearer token locally and restrict its permissions:
+
+   ```bash
+   chmod 600 .tmp/token.txt
+   ```
+
+7. Query the Prometheus API through the local HTTP endpoint. The HTTPS tunnel sets the upstream
+   `Host` and TLS SNI, while its explicit checkbox handles this example route's internally signed
+   certificate:
+
+   ```bash
+   curl -s \
+     -H "Authorization: Bearer $(<.tmp/token.txt)" \
+     'http://127.0.0.1:18443/api/v1/query?query=up' \
+     | jq
+   ```
+
+8. Download metric names and find metrics beginning with `nac_`:
+
+   ```bash
+   curl -s \
+     -H "Authorization: Bearer $(<.tmp/token.txt)" \
+     'http://127.0.0.1:18443/api/v1/label/__name__/values' \
+     | jq -r '.data[]' | sort > .tmp/metrics.txt
+
+   grep '^nac_' .tmp/metrics.txt
+   ```
+
+9. List label names or inspect all label sets belonging to `nac_` metrics:
+
+   ```bash
+   curl -s \
+     -H "Authorization: Bearer $(<.tmp/token.txt)" \
+     'http://127.0.0.1:18443/api/v1/labels' \
+     | jq -r '.data[]' | sort
+
+   curl -sG \
+     -H "Authorization: Bearer $(<.tmp/token.txt)" \
+     --data-urlencode 'match[]={__name__=~"nac_.*"}' \
+     'http://127.0.0.1:18443/api/v1/series' \
+     | jq '.data'
+   ```
+
+10. Click **Stop gateway** when finished. The UI waits until the Pod, ConfigMap, and Secret have
+    been removed.
+
+The Kubernetes identity used by the application needs `get` for Pods plus `create`, `get`,
+`update`, and `delete` for Pods, ConfigMaps, and Secrets, and permission to create `pods/portforward`
+requests in the selected namespace. The proxy Pod does not mount a service-account token, runs
+as non-root with a read-only filesystem, drops all capabilities, and is automatically terminated
+after the configured TTL.
 
 ## Health endpoint
 

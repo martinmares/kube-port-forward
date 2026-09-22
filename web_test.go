@@ -15,11 +15,12 @@ func TestWebUIEmbeddedAssets(t *testing.T) {
 		contains    string
 		cache       string
 	}{
-		{path: "/", contentType: "text/html", contains: "/static/css/app.css?v=2", cache: "no-cache"},
+		{path: "/", contentType: "text/html", contains: "/static/css/app.css?v=4", cache: "no-cache"},
 		{path: "/static/css/tabler.min.css", contentType: "text/css", contains: "Tabler v1.4.0", cache: "public, max-age=3600"},
-		{path: "/static/css/app.css?v=2", contentType: "text/css", contains: ".forwards-table", cache: "no-cache"},
+		{path: "/static/css/app.css?v=4", contentType: "text/css", contains: ".forwards-table", cache: "no-cache"},
 		{path: "/static/js/tabler.min.js", contentType: "text/javascript", contains: "Tabler v1.4.0", cache: "public, max-age=3600"},
-		{path: "/static/js/app.js?v=2", contentType: "text/javascript", contains: "new EventSource('/events')", cache: "no-cache"},
+		{path: "/static/js/app.js?v=4", contentType: "text/javascript", contains: "new EventSource('/events')", cache: "no-cache"},
+		{path: "/static/js/theme.js?v=1", contentType: "text/javascript", contains: "localStorage.getItem('theme')", cache: "no-cache"},
 		{path: "/static/fonts/tabler-icons.woff2", contentType: "font/woff2", cache: "public, max-age=3600"},
 	}
 
@@ -38,6 +39,9 @@ func TestWebUIEmbeddedAssets(t *testing.T) {
 			if got := response.Header().Get("Cache-Control"); got != test.cache {
 				t.Fatalf("Cache-Control = %q, want %q", got, test.cache)
 			}
+			if got := response.Header().Get("Content-Security-Policy"); !strings.Contains(got, "script-src 'self'") {
+				t.Fatalf("Content-Security-Policy = %q", got)
+			}
 			if test.contains != "" && !strings.Contains(response.Body.String(), test.contains) {
 				t.Fatalf("response does not contain %q", test.contains)
 			}
@@ -52,5 +56,16 @@ func TestWebUINotFound(t *testing.T) {
 
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+}
+
+func TestDiagnosticMutationRequiresSameOriginHeader(t *testing.T) {
+	server := &webServer{cfg: &config{webPort: 9999}}
+	request := httptest.NewRequest(http.MethodPost, "/api/diagnostic/start", strings.NewReader("{}"))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.handler().ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusForbidden)
 	}
 }

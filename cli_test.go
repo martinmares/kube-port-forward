@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -14,6 +15,27 @@ func TestParseArgsInsecure(t *testing.T) {
 
 	if !cfg.insecure {
 		t.Fatal("parseArgs() did not enable insecure TLS")
+	}
+}
+
+func TestParseArgsDiagnosticOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "diagnostic.yaml")
+	config := `image: registry.example/proxy:1
+policy:
+  defaultAction: deny
+  allow:
+    - hosts: ["*.test.svc.cluster.local"]
+      ports: ["80"]
+`
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := parseTestArgs(t, "-n", "test", "--diagnostic-config", path)
+	if len(cfg.targets) != 0 || cfg.diagnosticProfile == nil {
+		t.Fatalf("unexpected diagnostic-only config: %#v", cfg)
+	}
+	if cfg.namespace != "test" {
+		t.Fatalf("namespace = %q, want test", cfg.namespace)
 	}
 }
 

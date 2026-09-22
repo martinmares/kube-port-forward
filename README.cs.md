@@ -15,6 +15,7 @@ Správce Kubernetes port-forwardů s automatickým opětovným připojením a ž
 - **Potlačení duplicit** — sdílí jeden forward, pokud více zdrojů vybere stejný pod a vzdálený port
 - **Více zdrojů** — forwarduje několik cílů v jednom procesu
 - **Webové UI** — zobrazuje živý stav a metadata a nabízí akce pro otevření a kopírování
+- **Diagnostická brána** — zpřístupní povolené clusterové TCP, HTTP nebo HTTPS endpointy přes krátkodobý proxy pod
 - **Autodetekce namespace** — čte namespace aktuálního kontextu z kubeconfig
 - **Bez závislosti na kubectl** — používá přímo oficiální knihovnu `client-go`
 
@@ -30,6 +31,8 @@ S nainstalovaným nástrojem [just](https://just.systems/):
 | `just build-macos` | macOS / Apple Silicon | `dist/kube-port-forward-darwin-arm64` |
 | `just build-linux` | Linux / AMD64 | `dist/kube-port-forward-linux-amd64` |
 | `just build-win` | Windows / AMD64 | `dist/kube-port-forward-windows-amd64.exe` |
+| `just build-proxy` | Aktuální platforma | `dist/kube-port-forward-proxy` |
+| `just build-proxy-linux` | Linux / AMD64 | `dist/kube-port-forward-proxy-linux-amd64` |
 
 Alternativně lze aplikaci sestavit přímo pomocí Go:
 
@@ -47,7 +50,7 @@ sudo cp dist/kube-port-forward /usr/local/bin/
 ## Použití
 
 ```text
-kube-port-forward [OPTIONS] -n <namespace> <pod|svc|deploy>/<name> <localPort>:<remotePort|*> [...]
+kube-port-forward [OPTIONS] -n <namespace> [<pod|svc|deploy>/<name> <localPort>:<remotePort|*> ...]
 ```
 
 ### Podporované cíle
@@ -73,6 +76,7 @@ dynamicky. Services vytvořené později vyžadují restart aplikace.
 | `--web-port` | `9999` | Lokální port webového UI |
 | `--no-open` | vypnuto | Zakáže automatické otevření prohlížeče |
 | `--insecure` | vypnuto | Přeskočí ověření TLS certifikátu Kubernetes API serveru |
+| `--diagnostic-config` | vypnuto | Zapne diagnostickou bránu pomocí lokálního YAML profilu |
 
 > **Varování:** `--insecure` vypne ověřování TLS certifikátu API serveru. Používejte jej pouze
 > pro clustery, kterým důvěřujete.
@@ -170,6 +174,152 @@ Stránka zobrazuje:
 
 UI se aktualizuje prostřednictvím server-sent events (SSE), bez obnovování stránky, a v patičce
 zobrazuje aktuální stav spojení.
+
+## Diagnostická brána
+
+Diagnostická brána zpřístupňuje hostname a port dostupný pouze z clusteru. Aplikace vytvoří
+krátkodobý proxy Pod, immutable ConfigMapu s policy a dočasný Secret pro autentizaci, otevře k němu
+privátní Kubernetes port-forward a vybrané cíle vystaví na `127.0.0.1`.
+
+Sestavte proxy image a nahrajte ji do registry dostupného z clusteru:
+
+```bash
+just docker-build-proxy registry.example.com/tools/kube-port-forward-proxy:latest
+docker push registry.example.com/tools/kube-port-forward-proxy:latest
+```
+
+Zkopírujte [`diagnostic.example.yaml`](diagnostic.example.yaml), nastavte image a allow/deny
+pravidla a spusťte aplikaci:
+
+```bash
+kube-port-forward -n nac-app \
+  --diagnostic-config ~/.config/kube-port-forward/ocp-prod.yaml
+```
+
+Profil nemá pole s verzí schématu. Neznámá pole jsou odmítnuta, aby se odhalily chyby v
+konfiguraci. Deny pravidla mají přednost před allow pravidly a výchozí příklad zakazuje všechny
+ostatní cíle. Hostname se překládá uvnitř clusteru a každá získaná IP adresa se před připojením
+kontroluje.
+
+V UI lze upravit pracovní kopii profilu, spustit nebo zastavit diagnostický Pod, otestovat
+dostupnost cíle a vytvořit lokální TCP, HTTP nebo HTTPS endpoint. Úpravy v UI nepřepisují lokální YAML.
+
+Režim TCP poskytuje nezměněný proud bajtů a ponechává end-to-end TLS v lokálním klientovi. HTTP
+používá nešifrované HTTP směrem k cíli. HTTPS přijímá lokální HTTP na `127.0.0.1`, k cíli se připojí
+přes TLS a automaticky nastaví HTTP `Host` i TLS SNI. Certifikát cíle se ve výchozím stavu ověřuje;
+volba **Skip upstream TLS certificate verification (insecure)** je explicitní nastavení konkrétního
+tunelu pro důvěryhodné interní endpointy. Autentizační hlavičky dodané lokálním klientem se předají
+v rámci requestu a aplikace je neukládá ani neloguje.
+
+### Kompletní příklad: OpenShift Thanos API
+
+Tento příklad zpřístupní OpenShift Thanos/Prometheus API route z namespace `nac-app`. Předpokládá,
+že je Docker již přihlášený k `quay.in.cetin.sk`.
+
+1. Sestavte proxy pro architekturu clusteru a nahrajte ji do interního registry:
+
+   ```bash
+   docker buildx build \
+     --platform linux/amd64 \
+     -f Dockerfile.proxy \
+     -t quay.in.cetin.sk/nac_prod/kube-port-forward-proxy:latest \
+     --push .
+   ```
+
+2. Vytvořte `.tmp/diagnostic-thanos.yaml` bez pole s verzí schématu:
+
+   ```yaml
+   image: quay.in.cetin.sk/nac_prod/kube-port-forward-proxy:latest
+   pullPolicy: Always
+   imagePullSecrets:
+     - tsm-oc-pull-secret
+   ttl: 1h
+   maxConnections: 16
+   connectTimeout: 10s
+   idleTimeout: 15m
+
+   policy:
+     defaultAction: deny
+     allow:
+       - hosts:
+           - thanos-querier-openshift-monitoring.apps.ocp2.in.cetin.sk
+         ports:
+           - "443"
+   ```
+
+3. Spusťte aplikaci. `--insecure` je potřeba pouze tehdy, když lokálně nelze ověřit certifikát
+   Kubernetes API:
+
+   ```bash
+   ./dist/kube-port-forward \
+     --insecure \
+     -n nac-app \
+     --diagnostic-config .tmp/diagnostic-thanos.yaml
+   ```
+
+4. Otevřete `http://127.0.0.1:9999`, klikněte na **Start diagnostic pod** a počkejte na stav
+   **Ready**.
+
+5. V UI vytvořte endpoint s těmito hodnotami:
+
+   | Pole | Hodnota |
+   |------|---------|
+   | Name | `Thanos API` |
+   | Cluster hostname or IP | `thanos-querier-openshift-monitoring.apps.ocp2.in.cetin.sk` |
+   | Target port | `443` |
+   | Local port | `18443` |
+   | Mode | `HTTPS` |
+   | Skip upstream TLS certificate verification | zapnuto pro tuto interně podepsanou route |
+
+6. Uložte bearer token pouze lokálně a omezte jeho oprávnění:
+
+   ```bash
+   chmod 600 .tmp/token.txt
+   ```
+
+7. Zavolejte Prometheus API přes lokální HTTP endpoint. HTTPS tunel nastaví upstream `Host` a TLS
+   SNI; explicitní checkbox v tomto příkladu řeší interně podepsaný certifikát route:
+
+   ```bash
+   curl -s \
+     -H "Authorization: Bearer $(<.tmp/token.txt)" \
+     'http://127.0.0.1:18443/api/v1/query?query=up' \
+     | jq
+   ```
+
+8. Stáhněte názvy metrik a vyhledejte metriky začínající na `nac_`:
+
+   ```bash
+   curl -s \
+     -H "Authorization: Bearer $(<.tmp/token.txt)" \
+     'http://127.0.0.1:18443/api/v1/label/__name__/values' \
+     | jq -r '.data[]' | sort > .tmp/metrics.txt
+
+   grep '^nac_' .tmp/metrics.txt
+   ```
+
+9. Vypište názvy labelů nebo prohlédněte všechny sady labelů patřící metrikám `nac_`:
+
+   ```bash
+   curl -s \
+     -H "Authorization: Bearer $(<.tmp/token.txt)" \
+     'http://127.0.0.1:18443/api/v1/labels' \
+     | jq -r '.data[]' | sort
+
+   curl -sG \
+     -H "Authorization: Bearer $(<.tmp/token.txt)" \
+     --data-urlencode 'match[]={__name__=~"nac_.*"}' \
+     'http://127.0.0.1:18443/api/v1/series' \
+     | jq '.data'
+   ```
+
+10. Po dokončení klikněte na **Stop gateway**. UI počká, dokud nebudou Pod, ConfigMap a Secret
+    odstraněny.
+
+Kubernetes identita aplikace potřebuje oprávnění `get` pro Pody, `create`, `get`, `update` a
+`delete` pro Pody, ConfigMapy a Secrety a možnost vytvářet požadavky `pods/portforward` ve vybraném
+namespace. Proxy Pod nemountuje service-account token, běží jako non-root s read-only filesystemem,
+zahazuje všechny capabilities a po nastaveném TTL se automaticky ukončí.
 
 ## Health endpoint
 

@@ -1,0 +1,30 @@
+image: registry.example.com/tools/kube-port-forward-proxy:latest
+pullPolicy: IfNotPresent
+imagePullSecrets: []
+ttl: 8h
+maxConnections: 64
+connectTimeout: 10s
+idleTimeout: 15m
+
+policy:
+  defaultAction: deny
+  allow:
+    - hosts:
+        - "*.nac-app.svc.cluster.local"
+        - "postgres.internal.example.com"
+      ports:
+        - "80"
+        - "443"
+        - "5432"
+    - cidrs:
+        - "10.128.20.0/24"
+      ports:
+        - "8080-8090"
+  deny:
+    - hosts:
+        - "kubernetes.default.svc"
+        - "kubernetes.default.svc.cluster.local"
+    - cidrs:
+        - "169.254.0.0/16"
+        - "127.0.0.0/8"
+        - "::1/128"

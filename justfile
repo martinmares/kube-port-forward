@@ -1,4 +1,5 @@
 binary := "kube-port-forward"
+proxy_binary := "kube-port-forward-proxy"
 output_dir := "dist"
 
 default: build
@@ -22,3 +23,17 @@ build-linux:
 build-win:
     mkdir -p {{output_dir}}
     CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o {{output_dir}}/{{binary}}-windows-amd64.exe .
+
+# Build the in-cluster diagnostic proxy for the current platform.
+build-proxy:
+    mkdir -p {{output_dir}}
+    CGO_ENABLED=0 go build -o {{output_dir}}/{{proxy_binary}} ./cmd/kube-port-forward-proxy
+
+# Build the in-cluster diagnostic proxy for Linux AMD64.
+build-proxy-linux:
+    mkdir -p {{output_dir}}
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o {{output_dir}}/{{proxy_binary}}-linux-amd64 ./cmd/kube-port-forward-proxy
+
+# Build the diagnostic proxy container image.
+docker-build-proxy image:
+    docker build -f Dockerfile.proxy -t {{image}} .

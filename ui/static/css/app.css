@@ -57,6 +57,45 @@ body { overflow-x: hidden; }
 .metric-card { border-color: color-mix(in srgb, var(--tblr-border-color) 85%, transparent); }
 .metric-card .avatar { flex: 0 0 auto; }
 
+.diagnostic-card .card-header {
+  min-height: 4rem;
+}
+
+.diagnostic-settings summary {
+  cursor: pointer;
+  font-weight: 600;
+  list-style-position: inside;
+}
+
+.policy-editor {
+  height: 18rem;
+  min-height: 18rem;
+  resize: vertical;
+  tab-size: 2;
+}
+
+.diagnostic-tunnel-list {
+  display: grid;
+  gap: 0;
+}
+
+.diagnostic-tunnel-item {
+  align-items: center;
+  border-bottom: 1px solid var(--tblr-border-color);
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(12rem, 1fr) minmax(15rem, 1.3fr) minmax(11rem, auto) auto;
+  padding: .85rem 1rem;
+}
+
+.diagnostic-tunnel-item:last-child { border-bottom: 0; }
+.diagnostic-tunnel-target,
+.diagnostic-tunnel-address {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .forwards-card .card-header {
   min-height: 4rem;
   justify-content: space-between;
@@ -173,7 +212,15 @@ body { overflow-x: hidden; }
   .page-body { padding-top: .75rem; }
   .pod-cell { min-width: 13rem; }
   .resource-list { max-width: 12rem; }
+  .resource-filter { min-width: 0; max-width: 100%; width: 100%; }
   .port-mapping { font-size: .8rem; }
+  .diagnostic-card .card-header { align-items: flex-start; }
+  .diagnostic-tunnel-item {
+    align-items: start;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .diagnostic-tunnel-target,
+  .diagnostic-tunnel-address { grid-column: 1 / -1; }
 }
 
 @media (max-width: 1399.98px) {

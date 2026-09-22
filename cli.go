@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mares/kube-port-forward/internal/diagnostic"
 	"github.com/spf13/cobra"
 )
 
@@ -45,13 +46,16 @@ func (t *target) resourceStr() string {
 }
 
 type config struct {
-	targets       []target
-	retries       int
-	retryInterval time.Duration
-	logLevel      slog.Level
-	webPort       int
-	openBrowser   bool
-	insecure      bool
+	namespace            string
+	targets              []target
+	retries              int
+	retryInterval        time.Duration
+	logLevel             slog.Level
+	webPort              int
+	openBrowser          bool
+	insecure             bool
+	diagnosticConfigPath string
+	diagnosticProfile    *diagnostic.Profile
 }
 
 // defaultNamespace returns the current-context namespace from kubeconfig, or "".
@@ -65,13 +69,14 @@ func defaultNamespace() string {
 
 func parseArgs() (*config, error) {
 	var (
-		namespace     string
-		retriesStr    string
-		retryInterval int
-		logLevelStr   string
-		webPort       int
-		noOpen        bool
-		insecure      bool
+		namespace            string
+		retriesStr           string
+		retryInterval        int
+		logLevelStr          string
+		webPort              int
+		noOpen               bool
+		insecure             bool
+		diagnosticConfigPath string
 	)
 
 	defNS := defaultNamespace()
@@ -81,7 +86,7 @@ func parseArgs() (*config, error) {
 	}
 
 	cmd := &cobra.Command{
-		Use:   "kube-port-forward [OPTIONS] <pod|svc|deploy>/<name> <localPort>:<remotePort> [...]",
+		Use:   "kube-port-forward [OPTIONS] [<pod|svc|deploy>/<name> <localPort>:<remotePort> ...]",
 		Short: "Port-forward manager with auto-reconnect and web UI",
 		Long: `Port-forward manager with auto-reconnect and web UI.
 Multiple resources can be specified by repeating <resource> <ports> pairs.`,
@@ -93,6 +98,7 @@ Multiple resources can be specified by repeating <resource> <ports> pairs.`,
   kube-port-forward -n nac-app svc/foo 9091:9090 svc/bar 9093:8080
   kube-port-forward --retries 5 --retry-interval 10 -n nac-app svc/nac-out 9091:9090
   kube-port-forward --insecure -n nac-app pod/nac-out-xxx 9090:9090
+  kube-port-forward -n nac-app --diagnostic-config ~/.config/kube-port-forward/ocp-prod.yaml
   kube-port-forward -n nac-app svc/nac-out 9091:9090 --no-open`,
 		Args:         cobra.ArbitraryArgs,
 		SilenceUsage: true,
@@ -105,14 +111,15 @@ Multiple resources can be specified by repeating <resource> <ports> pairs.`,
 	cmd.Flags().IntVar(&webPort, "web-port", defaultWebPort, "local port for the web UI")
 	cmd.Flags().BoolVar(&noOpen, "no-open", false, "disable automatic browser opening on start")
 	cmd.Flags().BoolVar(&insecure, "insecure", false, "skip Kubernetes API server TLS certificate verification")
+	cmd.Flags().StringVar(&diagnosticConfigPath, "diagnostic-config", "", "local YAML profile for the diagnostic gateway")
 
 	var cfg *config
 	var parseErr error
 
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
-		if len(args) < 2 {
+		if len(args) == 0 && diagnosticConfigPath == "" {
 			_ = cmd.Help()
-			return fmt.Errorf("missing required arguments: <resource> <localPort>:<remotePort>")
+			return fmt.Errorf("provide forwarding targets or --diagnostic-config")
 		}
 		if len(args)%2 != 0 {
 			return fmt.Errorf("arguments must be pairs of <resource> <localPort>:<remotePort>, got %d args", len(args))
@@ -161,14 +168,26 @@ Multiple resources can be specified by repeating <resource> <ports> pairs.`,
 			return err
 		}
 
+		var diagnosticProfile *diagnostic.Profile
+		if diagnosticConfigPath != "" {
+			profile, err := diagnostic.LoadProfile(diagnosticConfigPath)
+			if err != nil {
+				return err
+			}
+			diagnosticProfile = &profile
+		}
+
 		cfg = &config{
-			targets:       targets,
-			retries:       retries,
-			retryInterval: time.Duration(retryInterval) * time.Second,
-			logLevel:      logLevel,
-			webPort:       webPort,
-			openBrowser:   !noOpen,
-			insecure:      insecure,
+			namespace:            namespace,
+			targets:              targets,
+			retries:              retries,
+			retryInterval:        time.Duration(retryInterval) * time.Second,
+			logLevel:             logLevel,
+			webPort:              webPort,
+			openBrowser:          !noOpen,
+			insecure:             insecure,
+			diagnosticConfigPath: diagnosticConfigPath,
+			diagnosticProfile:    diagnosticProfile,
 		}
 		return nil
 	}
