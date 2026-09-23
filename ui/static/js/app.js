@@ -275,23 +275,32 @@
       starting: ['Starting', 'badge bg-blue-lt text-blue'],
       ready: ['Ready', 'badge bg-green-lt text-green'],
       stopping: ['Stopping', 'badge bg-yellow-lt text-yellow'],
+      expired: ['Expired', 'badge bg-yellow-lt text-yellow'],
+      terminated: ['Terminated', 'badge bg-secondary-lt text-secondary'],
       error: ['Error', 'badge bg-red-lt text-red'],
     };
     const statusStyle = statusStyles[status] || [status, 'badge bg-secondary-lt text-secondary'];
     elements.diagnosticStatus.textContent = statusStyle[0];
     elements.diagnosticStatus.className = statusStyle[1];
+    const terminal = status === 'expired' || status === 'terminated';
     elements.diagnosticSubtitle.textContent = diagnostic.podName
       ? diagnostic.podName + ' · ' + diagnostic.namespace
       : 'Private cluster egress gateway · ' + diagnostic.namespace;
-    elements.diagnosticSubtitle.title = elements.diagnosticSubtitle.textContent;
+    if (terminal && diagnostic.statusReason) {
+      elements.diagnosticSubtitle.textContent += ' · ' + diagnostic.statusReason;
+    }
+    elements.diagnosticSubtitle.dataset.baseText = elements.diagnosticSubtitle.textContent;
+    elements.diagnosticSubtitle.dataset.expiresAt = !terminal && diagnostic.expiresAt ? diagnostic.expiresAt : '';
+    updateDiagnosticExpiry();
 
-    const showConfig = status === 'stopped' || status === 'error';
+    const showConfig = status === 'stopped' || status === 'error' || terminal;
     const showProgress = status === 'starting' || status === 'stopping';
     const showReady = status === 'ready';
     elements.diagnosticConfigForm.classList.toggle('d-none', !showConfig);
     elements.diagnosticProgress.classList.toggle('d-none', !showProgress);
     elements.diagnosticReady.classList.toggle('d-none', !showReady);
-    elements.diagnosticStop.classList.toggle('d-none', status === 'stopped');
+    const canStop = status === 'starting' || status === 'ready' || status === 'stopping' || status === 'error';
+    elements.diagnosticStop.classList.toggle('d-none', !canStop);
     elements.diagnosticStop.disabled = status === 'stopping';
     setDiagnosticStopBusy(status === 'stopping');
     if (status === 'stopping') {
@@ -302,9 +311,18 @@
       elements.diagnosticProgressDetail.textContent = 'Creating the ConfigMap, waiting for readiness, and opening a private Kubernetes port-forward.';
     }
 
-    const error = diagnosticRequestError || diagnostic.error || '';
-    elements.diagnosticError.textContent = error;
-    elements.diagnosticError.classList.toggle('d-none', !error);
+    elements.diagnosticStart.innerHTML = terminal
+      ? '<i class="ti ti-refresh me-1"></i>Start new diagnostic pod'
+      : '<i class="ti ti-player-play me-1"></i>Start diagnostic pod';
+
+    let notice = diagnosticRequestError || diagnostic.statusMessage || diagnostic.error || '';
+    if (!diagnosticRequestError && diagnostic.statusMessage && diagnostic.error) {
+      notice += ' Details: ' + diagnostic.error;
+    }
+    const reason = !diagnosticRequestError && diagnostic.statusReason ? diagnostic.statusReason + '. ' : '';
+    elements.diagnosticError.textContent = reason + notice;
+    elements.diagnosticError.className = 'alert m-3 mb-0 ' + (terminal ? 'alert-warning' : 'alert-danger');
+    elements.diagnosticError.classList.toggle('d-none', !notice);
     renderDiagnosticTunnels(diagnostic.tunnels || []);
   }
 
@@ -404,6 +422,28 @@
     return days + 'd ' + (hours % 24) + 'h';
   }
 
+  function timeRemaining(value) {
+    const seconds = Math.max(0, Math.ceil((new Date(value).getTime() - Date.now()) / 1000));
+    if (!Number.isFinite(seconds)) return '';
+    if (seconds < 60) return seconds + 's';
+    const minutes = Math.ceil(seconds / 60);
+    if (minutes < 60) return minutes + 'm';
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return hours + 'h ' + (minutes % 60) + 'm';
+    const days = Math.floor(hours / 24);
+    return days + 'd ' + (hours % 24) + 'h';
+  }
+
+  function updateDiagnosticExpiry() {
+    const base = elements.diagnosticSubtitle.dataset.baseText || elements.diagnosticSubtitle.textContent;
+    const expiresAt = elements.diagnosticSubtitle.dataset.expiresAt;
+    const remaining = expiresAt ? timeRemaining(expiresAt) : '';
+    elements.diagnosticSubtitle.textContent = remaining ? base + ' · expires in ' + remaining : base;
+    elements.diagnosticSubtitle.title = expiresAt
+      ? base + ' · expires ' + new Date(expiresAt).toLocaleString()
+      : elements.diagnosticSubtitle.textContent;
+  }
+
   function relativeUpdate() {
     if (!lastUpdate) return 'waiting for first state';
     const seconds = Math.max(0, Math.floor((Date.now() - lastUpdate.getTime()) / 1000));
@@ -423,6 +463,7 @@
     document.querySelectorAll('[data-start]').forEach(element => {
       element.textContent = age(element.dataset.start);
     });
+    updateDiagnosticExpiry();
     updateLiveState();
   }
 

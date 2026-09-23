@@ -47,12 +47,17 @@ type diagnosticManager struct {
 	configPath string
 
 	status        string
+	statusReason  string
+	statusMessage string
 	errorMessage  string
 	podName       string
 	configMap     string
 	secretName    string
 	token         string
 	proxyAddress  string
+	startedAt     time.Time
+	expiresAt     time.Time
+	finishedAt    time.Time
 	sessionCancel context.CancelFunc
 	tunnels       map[string]*diagnosticTunnel
 }
@@ -73,6 +78,8 @@ type diagnosticSnapshot struct {
 	Configured       bool                       `json:"configured"`
 	ConfigPath       string                     `json:"configPath,omitempty"`
 	Status           string                     `json:"status"`
+	StatusReason     string                     `json:"statusReason,omitempty"`
+	StatusMessage    string                     `json:"statusMessage,omitempty"`
 	Error            string                     `json:"error,omitempty"`
 	Namespace        string                     `json:"namespace"`
 	PodName          string                     `json:"podName,omitempty"`
@@ -85,6 +92,9 @@ type diagnosticSnapshot struct {
 	ConnectTimeout   string                     `json:"connectTimeout,omitempty"`
 	IdleTimeout      string                     `json:"idleTimeout,omitempty"`
 	PolicyYAML       string                     `json:"policyYAML,omitempty"`
+	StartedAt        string                     `json:"startedAt,omitempty"`
+	ExpiresAt        string                     `json:"expiresAt,omitempty"`
+	FinishedAt       string                     `json:"finishedAt,omitempty"`
 	Tunnels          []diagnosticTunnelSnapshot `json:"tunnels"`
 }
 
@@ -120,14 +130,25 @@ func (m *diagnosticManager) snapshot() diagnosticSnapshot {
 	defer m.mu.RUnlock()
 
 	snapshot := diagnosticSnapshot{
-		Configured: m.profile != nil,
-		ConfigPath: m.configPath,
-		Status:     m.status,
-		Error:      m.errorMessage,
-		Namespace:  m.namespace,
-		PodName:    m.podName,
-		ConfigMap:  m.configMap,
-		Tunnels:    make([]diagnosticTunnelSnapshot, 0, len(m.tunnels)),
+		Configured:    m.profile != nil,
+		ConfigPath:    m.configPath,
+		Status:        m.status,
+		StatusReason:  m.statusReason,
+		StatusMessage: m.statusMessage,
+		Error:         m.errorMessage,
+		Namespace:     m.namespace,
+		PodName:       m.podName,
+		ConfigMap:     m.configMap,
+		Tunnels:       make([]diagnosticTunnelSnapshot, 0, len(m.tunnels)),
+	}
+	if !m.startedAt.IsZero() {
+		snapshot.StartedAt = m.startedAt.UTC().Format(time.RFC3339)
+	}
+	if !m.expiresAt.IsZero() {
+		snapshot.ExpiresAt = m.expiresAt.UTC().Format(time.RFC3339)
+	}
+	if !m.finishedAt.IsZero() {
+		snapshot.FinishedAt = m.finishedAt.UTC().Format(time.RFC3339)
 	}
 	if m.profile != nil {
 		snapshot.Image = m.profile.Image
@@ -183,7 +204,12 @@ func (m *diagnosticManager) start(profile diagnostic.Profile) error {
 	}
 	m.profile = &profile
 	m.status = "starting"
+	m.statusReason = ""
+	m.statusMessage = ""
 	m.errorMessage = ""
+	m.startedAt = time.Time{}
+	m.expiresAt = time.Time{}
+	m.finishedAt = time.Time{}
 	m.mu.Unlock()
 	m.changed()
 
@@ -237,6 +263,11 @@ func (m *diagnosticManager) start(profile diagnostic.Profile) error {
 	m.secretName = createdSecret.Name
 	m.token = token
 	m.sessionCancel = cancel
+	m.startedAt = createdPod.CreationTimestamp.Time
+	if m.startedAt.IsZero() {
+		m.startedAt = time.Now()
+	}
+	m.expiresAt = m.startedAt.Add(profile.TTLDuration())
 	m.mu.Unlock()
 	m.changed()
 	m.logger.Info("diagnostic pod created", "pod", createdPod.Name, "configmap", createdConfigMap.Name, "secret", createdSecret.Name)
@@ -247,7 +278,10 @@ func (m *diagnosticManager) start(profile diagnostic.Profile) error {
 func (m *diagnosticManager) failStart(err error) error {
 	m.mu.Lock()
 	m.status = "error"
+	m.statusReason = "Start failed"
+	m.statusMessage = "The diagnostic gateway could not be started."
 	m.errorMessage = err.Error()
+	m.finishedAt = time.Now()
 	m.mu.Unlock()
 	m.changed()
 	return err
@@ -256,7 +290,12 @@ func (m *diagnosticManager) failStart(err error) error {
 func (m *diagnosticManager) runSession(ctx context.Context, podName string) {
 	if err := m.waitForReady(ctx, podName); err != nil {
 		if ctx.Err() == nil {
-			m.setError(err)
+			if termination, ok := m.detectDiagnosticTermination(ctx, podName, 0); ok {
+				m.setTerminal(podName, termination)
+				m.cleanupTerminalResources(podName)
+			} else {
+				m.setError(err)
+			}
 		}
 		return
 	}
@@ -272,24 +311,154 @@ func (m *diagnosticManager) runSession(ctx context.Context, podName string) {
 	m.mu.Lock()
 	m.proxyAddress = fmt.Sprintf("127.0.0.1:%d", localPort)
 	m.status = "ready"
+	m.statusReason = ""
+	m.statusMessage = ""
 	m.errorMessage = ""
 	m.mu.Unlock()
 	m.changed()
 	m.logger.Info("diagnostic gateway ready", "pod", podName)
 
-	select {
-	case <-ctx.Done():
-		return
-	case err := <-done:
-		if ctx.Err() == nil {
+	monitor := time.NewTicker(5 * time.Second)
+	defer monitor.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case err := <-done:
+			if ctx.Err() != nil {
+				return
+			}
 			m.closeTunnels()
-			if err == nil {
+			if termination, ok := m.detectDiagnosticTermination(ctx, podName, 5*time.Second); ok {
+				m.setTerminal(podName, termination)
+				m.cleanupTerminalResources(podName)
+			} else if err == nil {
 				m.setError(fmt.Errorf("diagnostic pod port-forward stopped unexpectedly"))
 			} else {
 				m.setError(fmt.Errorf("diagnostic pod port-forward stopped: %w", err))
 			}
+			return
+		case <-monitor.C:
+			termination, terminal, err := m.inspectDiagnosticPod(ctx, podName)
+			if err != nil {
+				m.logger.Warn("could not inspect diagnostic pod", "pod", podName, "err", err)
+				continue
+			}
+			if terminal {
+				m.closeTunnels()
+				m.setTerminal(podName, termination)
+				m.cleanupTerminalResources(podName)
+				return
+			}
 		}
 	}
+}
+
+type diagnosticTermination struct {
+	status     string
+	reason     string
+	message    string
+	finishedAt time.Time
+}
+
+func (m *diagnosticManager) inspectDiagnosticPod(ctx context.Context, podName string) (diagnosticTermination, bool, error) {
+	pod, err := m.client.clientset.CoreV1().Pods(m.namespace).Get(ctx, podName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return diagnosticTermination{
+			status: "terminated", reason: "Pod removed",
+			message:    fmt.Sprintf("Diagnostic Pod %q no longer exists in namespace %q. Start a new gateway to continue.", podName, m.namespace),
+			finishedAt: time.Now(),
+		}, true, nil
+	}
+	if err != nil {
+		return diagnosticTermination{}, false, err
+	}
+	termination, terminal := diagnosticPodTermination(pod, m.profileTTL())
+	return termination, terminal, nil
+}
+
+func (m *diagnosticManager) detectDiagnosticTermination(ctx context.Context, podName string, wait time.Duration) (diagnosticTermination, bool) {
+	deadline := time.Now().Add(wait)
+	for {
+		termination, terminal, err := m.inspectDiagnosticPod(ctx, podName)
+		if err == nil && terminal {
+			return termination, true
+		}
+		if wait <= 0 || time.Now().After(deadline) || ctx.Err() != nil {
+			return diagnosticTermination{}, false
+		}
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return diagnosticTermination{}, false
+		case <-timer.C:
+		}
+	}
+}
+
+func (m *diagnosticManager) profileTTL() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.profile == nil {
+		return ""
+	}
+	return m.profile.TTL
+}
+
+func diagnosticPodTermination(pod *corev1.Pod, ttl string) (diagnosticTermination, bool) {
+	if pod.DeletionTimestamp != nil {
+		return diagnosticTermination{
+			status: "terminated", reason: "Pod terminating",
+			message:    fmt.Sprintf("Diagnostic Pod %q is being terminated by Kubernetes. Start a new gateway to continue.", pod.Name),
+			finishedAt: time.Now(),
+		}, true
+	}
+	if pod.Status.Phase != corev1.PodFailed && pod.Status.Phase != corev1.PodSucceeded {
+		return diagnosticTermination{}, false
+	}
+
+	finishedAt := diagnosticPodFinishedAt(pod)
+	if finishedAt.IsZero() {
+		finishedAt = time.Now()
+	}
+	if pod.Status.Reason == "DeadlineExceeded" {
+		lifetime := ttl
+		if lifetime == "" {
+			lifetime = "the configured limit"
+		}
+		return diagnosticTermination{
+			status: "expired", reason: "Maximum lifetime reached",
+			message:    fmt.Sprintf("Diagnostic Pod %q reached its maximum lifetime (%s) and was terminated by Kubernetes. Start a new gateway to continue.", pod.Name, lifetime),
+			finishedAt: finishedAt,
+		}, true
+	}
+
+	reason := strings.TrimSpace(pod.Status.Reason)
+	if reason == "" {
+		reason = string(pod.Status.Phase)
+	}
+	message := fmt.Sprintf("Diagnostic Pod %q finished with phase %s", pod.Name, pod.Status.Phase)
+	if pod.Status.Reason != "" {
+		message += " (" + pod.Status.Reason + ")"
+	}
+	if detail := strings.TrimSpace(pod.Status.Message); detail != "" {
+		message += ": " + detail
+	} else {
+		message += "."
+	}
+	message += " Start a new gateway to continue."
+	return diagnosticTermination{status: "terminated", reason: reason, message: message, finishedAt: finishedAt}, true
+}
+
+func diagnosticPodFinishedAt(pod *corev1.Pod) time.Time {
+	var finishedAt time.Time
+	for _, container := range pod.Status.ContainerStatuses {
+		if terminated := container.State.Terminated; terminated != nil && terminated.FinishedAt.Time.After(finishedAt) {
+			finishedAt = terminated.FinishedAt.Time
+		}
+	}
+	return finishedAt
 }
 
 func (m *diagnosticManager) waitForReady(ctx context.Context, podName string) error {
@@ -407,6 +576,8 @@ func (m *diagnosticManager) stop() error {
 	if firstErr != nil {
 		m.mu.Lock()
 		m.status = "error"
+		m.statusReason = "Cleanup failed"
+		m.statusMessage = "The diagnostic resources could not be removed completely."
 		m.errorMessage = firstErr.Error()
 		m.proxyAddress = ""
 		m.sessionCancel = nil
@@ -417,12 +588,17 @@ func (m *diagnosticManager) stop() error {
 
 	m.mu.Lock()
 	m.status = "stopped"
+	m.statusReason = ""
+	m.statusMessage = ""
 	m.errorMessage = ""
 	m.podName = ""
 	m.configMap = ""
 	m.secretName = ""
 	m.token = ""
 	m.proxyAddress = ""
+	m.startedAt = time.Time{}
+	m.expiresAt = time.Time{}
+	m.finishedAt = time.Time{}
 	m.sessionCancel = nil
 	m.mu.Unlock()
 	m.changed()
@@ -654,10 +830,71 @@ func (m *diagnosticManager) closeTunnels() {
 func (m *diagnosticManager) setError(err error) {
 	m.mu.Lock()
 	m.status = "error"
+	m.statusReason = "Gateway connection lost"
+	m.statusMessage = "The connection to the diagnostic Pod ended unexpectedly. The Pod may still require cleanup."
 	m.errorMessage = err.Error()
+	m.finishedAt = time.Now()
+	m.proxyAddress = ""
 	m.mu.Unlock()
 	m.changed()
 	m.logger.Error("diagnostic gateway failed", "err", err)
+}
+
+func (m *diagnosticManager) setTerminal(podName string, termination diagnosticTermination) {
+	m.mu.Lock()
+	if m.podName != podName {
+		m.mu.Unlock()
+		return
+	}
+	m.status = termination.status
+	m.statusReason = termination.reason
+	m.statusMessage = termination.message
+	m.errorMessage = ""
+	m.finishedAt = termination.finishedAt
+	m.proxyAddress = ""
+	m.token = ""
+	m.sessionCancel = nil
+	m.mu.Unlock()
+	m.changed()
+	m.logger.Info("diagnostic pod terminated", "pod", podName, "status", termination.status, "reason", termination.reason)
+}
+
+func (m *diagnosticManager) cleanupTerminalResources(podName string) {
+	m.mu.RLock()
+	if m.podName != podName {
+		m.mu.RUnlock()
+		return
+	}
+	configMap := m.configMap
+	secretName := m.secretName
+	m.mu.RUnlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	grace := int64(0)
+	resources := []struct {
+		kind   string
+		name   string
+		remove func() error
+	}{
+		{kind: "Pod", name: podName, remove: func() error {
+			return m.client.clientset.CoreV1().Pods(m.namespace).Delete(ctx, podName, metav1.DeleteOptions{GracePeriodSeconds: &grace})
+		}},
+		{kind: "ConfigMap", name: configMap, remove: func() error {
+			return m.client.clientset.CoreV1().ConfigMaps(m.namespace).Delete(ctx, configMap, metav1.DeleteOptions{})
+		}},
+		{kind: "Secret", name: secretName, remove: func() error {
+			return m.client.clientset.CoreV1().Secrets(m.namespace).Delete(ctx, secretName, metav1.DeleteOptions{})
+		}},
+	}
+	for _, resource := range resources {
+		if resource.name == "" {
+			continue
+		}
+		if err := resource.remove(); err != nil && !apierrors.IsNotFound(err) {
+			m.logger.Warn("could not clean up terminated diagnostic resource", "kind", resource.kind, "name", resource.name, "err", err)
+		}
+	}
 }
 
 func (m *diagnosticManager) changed() {

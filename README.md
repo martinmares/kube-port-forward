@@ -213,6 +213,15 @@ verified by default; **Skip upstream TLS certificate verification (insecure)** i
 per-tunnel override for trusted internal endpoints. Authentication headers supplied by the local
 client are forwarded per request and are never stored or logged by the application.
 
+While the gateway is running, the UI shows its remaining lifetime and the server checks the
+diagnostic Pod through the Kubernetes API every few seconds. Reaching `ttl` is shown as
+**Expired** with the `DeadlineExceeded` lifecycle
+reason; other completed, evicted, deleted, or failed Pods are shown as **Terminated** with the
+reason reported by Kubernetes. These terminal states are delivered to the UI over the existing
+SSE connection, close all local endpoints, hide the obsolete stop action, and offer starting a
+new diagnostic Pod. The finished Pod, ConfigMap, and Secret are cleaned up automatically after
+their terminal state has been recorded.
+
 ### End-to-end example: OpenShift Thanos API
 
 This example exposes an OpenShift Thanos/Prometheus API route from the `nac-app` namespace. It

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mares/kube-port-forward/internal/diagnostic"
 	corev1 "k8s.io/api/core/v1"
@@ -217,6 +218,52 @@ func TestDiagnosticOwnerReferenceDoesNotRequireFinalizerPermission(t *testing.T)
 	}
 }
 
+func TestDiagnosticPodTerminationReportsExpiredDeadline(t *testing.T) {
+	finishedAt := metav1.NewTime(time.Date(2026, time.September, 22, 10, 30, 0, 0, time.UTC))
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "kpf-diagnostic-expired"},
+		Status: corev1.PodStatus{
+			Phase:  corev1.PodFailed,
+			Reason: "DeadlineExceeded",
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "proxy",
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{FinishedAt: finishedAt}},
+			}},
+		},
+	}
+
+	termination, terminal := diagnosticPodTermination(pod, "2h")
+	if !terminal {
+		t.Fatal("deadline-exceeded Pod was not recognized as terminal")
+	}
+	if termination.status != "expired" || termination.reason != "Maximum lifetime reached" {
+		t.Fatalf("unexpected termination: %#v", termination)
+	}
+	if !strings.Contains(termination.message, "maximum lifetime (2h)") {
+		t.Fatalf("message does not explain expiration: %q", termination.message)
+	}
+	if !termination.finishedAt.Equal(finishedAt.Time) {
+		t.Fatalf("finishedAt = %s, want %s", termination.finishedAt, finishedAt.Time)
+	}
+}
+
+func TestDiagnosticPodTerminationReportsKubernetesReason(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "kpf-diagnostic-evicted"},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodFailed, Reason: "Evicted", Message: "node was under memory pressure",
+		},
+	}
+
+	termination, terminal := diagnosticPodTermination(pod, "2h")
+	if !terminal || termination.status != "terminated" || termination.reason != "Evicted" {
+		t.Fatalf("unexpected termination: terminal=%v value=%#v", terminal, termination)
+	}
+	if !strings.Contains(termination.message, "node was under memory pressure") {
+		t.Fatalf("message does not include Kubernetes detail: %q", termination.message)
+	}
+}
+
 func TestStopWaitsUntilDiagnosticResourcesAreDeleted(t *testing.T) {
 	const namespace = "test"
 	const name = "kpf-diagnostic-test"
@@ -237,5 +284,42 @@ func TestStopWaitsUntilDiagnosticResourcesAreDeleted(t *testing.T) {
 	}
 	if _, err := clientset.CoreV1().Pods(namespace).Get(t.Context(), name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("pod still exists or lookup failed unexpectedly: %v", err)
+	}
+}
+
+func TestTerminalDiagnosticResourcesAreCleanedUpWithoutLosingStatus(t *testing.T) {
+	const namespace = "test"
+	const name = "kpf-diagnostic-expired"
+	clientset := fake.NewSimpleClientset(
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}},
+	)
+	manager := &diagnosticManager{
+		client: &k8sClient{clientset: clientset}, namespace: namespace,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)), status: "ready",
+		podName: name, configMap: name, secretName: name, token: "secret-token",
+		tunnels: make(map[string]*diagnosticTunnel),
+	}
+	manager.setTerminal(name, diagnosticTermination{
+		status: "expired", reason: "Maximum lifetime reached", message: "Expired.", finishedAt: time.Now(),
+	})
+	manager.cleanupTerminalResources(name)
+
+	snapshot := manager.snapshot()
+	if snapshot.Status != "expired" || snapshot.StatusReason != "Maximum lifetime reached" || snapshot.StatusMessage != "Expired." {
+		t.Fatalf("terminal status was not preserved: %#v", snapshot)
+	}
+	if manager.token != "" {
+		t.Fatal("proxy token was retained after termination")
+	}
+	if _, err := clientset.CoreV1().Pods(namespace).Get(t.Context(), name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("pod still exists or lookup failed unexpectedly: %v", err)
+	}
+	if _, err := clientset.CoreV1().ConfigMaps(namespace).Get(t.Context(), name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("ConfigMap still exists or lookup failed unexpectedly: %v", err)
+	}
+	if _, err := clientset.CoreV1().Secrets(namespace).Get(t.Context(), name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("Secret still exists or lookup failed unexpectedly: %v", err)
 	}
 }

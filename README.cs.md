@@ -211,6 +211,14 @@ volba **Skip upstream TLS certificate verification (insecure)** je explicitní n
 tunelu pro důvěryhodné interní endpointy. Autentizační hlavičky dodané lokálním klientem se předají
 v rámci requestu a aplikace je neukládá ani neloguje.
 
+Za běhu brány UI ukazuje zbývající životnost a server každých několik sekund kontroluje
+diagnostický Pod přes Kubernetes API. Dosažení `ttl` se zobrazí jako **Expired** s lifecycle
+důvodem `DeadlineExceeded`; ostatní
+dokončené, evictované, smazané nebo selhané Pody se zobrazí jako **Terminated** s důvodem od
+Kubernetes. Terminální stav se do UI doručí přes stávající SSE spojení, zavře všechny lokální
+endpointy, skryje již neplatnou akci pro zastavení a nabídne spuštění nového diagnostického Podu.
+Ukončený Pod, ConfigMap a Secret se po zaznamenání terminálního stavu automaticky uklidí.
+
 ### Kompletní příklad: OpenShift Thanos API
 
 Tento příklad zpřístupní OpenShift Thanos/Prometheus API route z namespace `nac-app`. Předpokládá,

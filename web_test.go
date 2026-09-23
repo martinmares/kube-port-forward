@@ -19,7 +19,7 @@ func TestWebUIEmbeddedAssets(t *testing.T) {
 		{path: "/static/css/tabler.min.css", contentType: "text/css", contains: "Tabler v1.4.0", cache: "public, max-age=3600"},
 		{path: "/static/css/app.css?v=4", contentType: "text/css", contains: ".forwards-table", cache: "no-cache"},
 		{path: "/static/js/tabler.min.js", contentType: "text/javascript", contains: "Tabler v1.4.0", cache: "public, max-age=3600"},
-		{path: "/static/js/app.js?v=4", contentType: "text/javascript", contains: "new EventSource('/events')", cache: "no-cache"},
+		{path: "/static/js/app.js?v=5", contentType: "text/javascript", contains: "new EventSource('/events')", cache: "no-cache"},
 		{path: "/static/js/theme.js?v=1", contentType: "text/javascript", contains: "localStorage.getItem('theme')", cache: "no-cache"},
 		{path: "/static/fonts/tabler-icons.woff2", contentType: "font/woff2", cache: "public, max-age=3600"},
 	}
