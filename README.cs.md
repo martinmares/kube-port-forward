@@ -53,6 +53,16 @@ sudo cp dist/kube-port-forward /usr/local/bin/
 kube-port-forward [OPTIONS] -n <namespace> [<pod|svc|deploy>/<name> <localPort>:<remotePort|*> ...]
 ```
 
+Praktický návod v terminálu zobrazíte příkazem `kube-port-forward examples` (nebo `example`).
+Obsahuje příklady pro Pod, Service, Deployment, wildcard a více forwardů, nastavení UI i profil
+diagnostické brány. `examples --color auto|always|never` řídí barvy ANSI; při přesměrování je
+výstup ve výchozím stavu prostý text:
+
+```bash
+kube-port-forward examples
+kube-port-forward examples --color never > examples.txt
+```
+
 ### Podporované cíle
 
 | Cíl | Vyhledávání podů |
@@ -361,3 +371,12 @@ nerecyklují.
 - Pro čisté ukončení stiskněte `Ctrl+C` nebo pošlete signál `SIGTERM`.
 - `--log-level debug` zobrazuje podrobné události discovery a forwardování.
 - `--log-level warn` potlačí většinu interních logů `client-go`.
+
+## Licence a komerční podpora
+
+Software je poskytován pod [licencí MIT](LICENSE), bez záruky a bez nároku na bezplatnou komunitní
+podporu. Licence umožňuje i komerční použití, úpravy a distribuci.
+
+Profesionální podporu nabízí **[DataLite](https://datalite.cz)**: technickou pomoc, ověřené
+releasy, opravy chyb, aktualizace, pomoc s nasazením, řešení problémů a dlouhodobou údržbu.
+Možnosti komerční podpory vám sdělí [DataLite](https://datalite.cz).

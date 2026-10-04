@@ -112,6 +112,7 @@ Multiple resources can be specified by repeating <resource> <ports> pairs.`,
 	cmd.Flags().BoolVar(&noOpen, "no-open", false, "disable automatic browser opening on start")
 	cmd.Flags().BoolVar(&insecure, "insecure", false, "skip Kubernetes API server TLS certificate verification")
 	cmd.Flags().StringVar(&diagnosticConfigPath, "diagnostic-config", "", "local YAML profile for the diagnostic gateway")
+	cmd.AddCommand(newExamplesCommand())
 
 	var cfg *config
 	var parseErr error

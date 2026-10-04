@@ -53,6 +53,16 @@ sudo cp dist/kube-port-forward /usr/local/bin/
 kube-port-forward [OPTIONS] -n <namespace> [<pod|svc|deploy>/<name> <localPort>:<remotePort|*> ...]
 ```
 
+For a task-oriented guide in the terminal, run `kube-port-forward examples` (or `example`).
+It covers Pod, Service, Deployment, wildcard and multiple forwards, UI options, and a diagnostic
+gateway profile. `examples --color auto|always|never` controls ANSI color; redirected output is
+plain text by default:
+
+```bash
+kube-port-forward examples
+kube-port-forward examples --color never > examples.txt
+```
+
 ### Supported targets
 
 | Target | Pod discovery |
@@ -365,3 +375,12 @@ process lifetime.
 - Press `Ctrl+C` or send `SIGTERM` for a clean shutdown.
 - `--log-level debug` shows detailed discovery and forwarding events.
 - `--log-level warn` suppresses most internal `client-go` log noise.
+
+## License and commercial support
+
+This software is provided under the [MIT License](LICENSE), without warranty or free community
+support. The license permits commercial use, modification, and distribution.
+
+Commercial support is available from **[DataLite](https://datalite.cz)**, including technical
+assistance, verified releases, bug fixes, updates, deployment assistance, troubleshooting, and
+long-term maintenance. Contact [DataLite](https://datalite.cz) for commercial support options.
